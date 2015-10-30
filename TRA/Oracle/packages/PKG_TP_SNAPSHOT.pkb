@@ -1,3 +1,4 @@
+/* Formatted on 28/10/2015 4:41:00 PM (QP5 v5.269.14213.34769) */
 CREATE OR REPLACE PACKAGE BODY TEMP_DATA.PKG_TP_Snapshot
 IS
    /* This package is a cut down version of the NETSREPP transfer pricing snapshot and aggregation process */
@@ -23,6 +24,9 @@ IS
 
       COMMIT;
    END;
+   
+  
+   
 
    FUNCTION Get_Default_Tariff_O (in_site_id        NUMBER,
                                   in_date           DATE,
@@ -151,6 +155,27 @@ IS
          --dbms_output.put_line(substr(sqlerrm,1,200));
          RETURN NULL;
    END;
+   
+   
+    FUNCTION CALCULATE_ACTUAL_PERCENT(in_actual_date in date, in_end_date in date) return number
+   is
+   v_actual_pc number:=1;
+   begin
+   
+    begin
+      SELECT TO_NUMBER(TO_CHAR(in_actual_date,'DD'))/TO_NUMBER(TO_CHAR(in_end_date,'DD')) into v_actual_pc FROM 
+      dual;
+      
+      return v_actual_pc;
+      
+      EXCEPTION
+      WHEN OTHERS
+      THEN
+         log_message (err_stack, 'error');
+         
+      end;
+      
+   end;
 
    FUNCTION Get_Default_Tariff (in_site_id        NUMBER,
                                 in_start_date     DATE,
@@ -387,7 +412,9 @@ IS
                           in_apply_lp           IN VARCHAR2 DEFAULT 'Y',
                           in_cleanup_act        IN VARCHAR2 DEFAULT 'Y')
    IS
+   out_load_request       SYS_REFCURSOR;
    BEGIN
+      
       IF in_snap_hh_retail = 'Y'
       THEN
          snapshot_hh_retail (in_snapshot_id, in_start_date, in_finish_date);
@@ -496,9 +523,16 @@ IS
       END IF;
 
       agg_mass_market (in_snapshot_id, in_start_date, in_finish_date);
-      additional_adjustment(in_snapshot_id, in_start_date, in_finish_date);
-   -- create index on tp_agg_site_hh to speed up query performance
-     index_maintain ('CREATE');
+      -- only apply adjustment on current month
+      additional_adjustment (in_snapshot_id, trunc(sysdate,'MON'), in_finish_date);
+      -- create index on tp_agg_site_hh to speed up query performance
+      index_maintain ('CREATE');
+      
+      refresh_views(in_snapshot_id, in_start_date, in_finish_date);
+      
+      
+   
+      commit;
    END;
 
 
@@ -671,21 +705,19 @@ IS
                 STD_DEV,
                 MM_VALUE
            FROM tp_load_profile s
-          WHERE PERIOD_CODE in (
-          select to_char( add_months( start_date, level-1 ), 'MON' )
-      from (select in_start_date start_date,
-                   in_finish_date+1  end_date
-              from dual)
-     connect by level <= months_between(
-                           trunc(end_date,'MM'),
-                           trunc(start_date,'MM') )
-  *                      + 1
-          
-          );
-          
-          
-          
-           
+          WHERE PERIOD_CODE IN (    SELECT TO_CHAR (
+                                              ADD_MONTHS (start_date, LEVEL - 1),
+                                              'MON')
+                                      FROM (SELECT in_start_date start_date,
+                                                   in_finish_date + 1 end_date
+                                              FROM DUAL)
+                                CONNECT BY LEVEL <=
+                                                MONTHS_BETWEEN (
+                                                   TRUNC (end_date, 'MM'),
+                                                   TRUNC (start_date, 'MM'))
+                                              * +1);
+
+
 
       log_message ('tp_SNAP_LOAD_PROFILE  INSERT COUNT' || SQL%ROWCOUNT,
                    'info');
@@ -1116,92 +1148,101 @@ IS
                                  in_start_date    IN DATE,
                                  in_finish_date   IN DATE)
    IS
-   v_total_hh_count number(8);
-   v_actual_hh_count number(8);
-   v_actual_pc number;
+      v_actual_date  date;
+      v_max_date   date;
+      v_actual_pc         NUMBER:=1;
    BEGIN
-      
-
       EXECUTE IMMEDIATE 'truncate table tp_snap_ppa_hh';
-      
+
       EXECUTE IMMEDIATE 'truncate table tp_snap_setcpdata_t';
 
-      insert into tp_snap_setcpdata_t(tcpid, datetime, state, participantid, mw,NO_TLF_mw)
-        SELECT  tcpid, datetime, state, participantid, SUM (mwh)*2 as mw, SUM (NO_TLF_mwh)*2 AS NO_TLF_mw
-    FROM 
-    (
-        SELECT  
-            cp.settlementdate + cp.periodid / 48    AS datetime,
-            RTRIM (cp.regionid, 1)                  AS state, 
-            participantid,
-            tcpid,
-            SUM (-1 * cp.ta * cp.tlf)               AS mwh,
-            SUM (-1 * cp.ta )                       AS NO_TLF_mwh
-        FROM 
-            mms.setcpdata@sgpss.world cp, 
-            (
-                SELECT   bd.settlementdate, MAX (bd.runno) max_runno
-                FROM 
-                    mms.billingdaytrk@sgpss.world bd
-                WHERE
-                    settlementdate >= in_start_date
-                  AND
-                    settlementdate < in_finish_date
-              
-                GROUP BY 
-                    bd.settlementdate
-            ) vers
-        WHERE 
-                cp.settlementdate = vers.settlementdate
-        AND     cp.versionno = vers.max_runno 
-        GROUP BY 
-            cp.settlementdate + cp.periodid / 48,
-            participantid,
-            cp.regionid,
-            cp.tcpid
-    )
-    GROUP BY 
-        datetime, 
-        state, 
-        participantid,
-        tcpid;
+      INSERT INTO tp_snap_setcpdata_t (snapshot_id,tcpid,
+                                       datetime,
+                                       state,
+                                       participantid,
+                                       mw,
+                                       NO_TLF_mw
+                                       )
+           SELECT in_snapshot_id,tcpid,
+                  datetime,
+                  state,
+                  participantid,
+                  SUM (mwh) * 2 AS mw,
+                  SUM (NO_TLF_mwh) * 2 AS NO_TLF_mw
+             FROM (  SELECT cp.settlementdate + cp.periodid / 48 AS datetime,
+                            RTRIM (cp.regionid, 1) AS state,
+                            participantid,
+                            tcpid,
+                            SUM (-1 * cp.ta * cp.tlf) AS mwh,
+                            SUM (-1 * cp.ta) AS NO_TLF_mwh
+                       FROM mms.setcpdata@sgpss.world cp,
+                            (  SELECT bd.settlementdate, MAX (bd.runno) max_runno
+                                 FROM mms.billingdaytrk@sgpss.world bd
+                                WHERE     settlementdate >= in_start_date
+                                      AND settlementdate < in_finish_date
+                                      AND bd.runno <> 1 -- temp fix to get around data issue with D+1
+                             GROUP BY bd.settlementdate) vers
+                      WHERE     cp.settlementdate = vers.settlementdate
+                            AND cp.versionno = vers.max_runno
+                   GROUP BY cp.settlementdate + cp.periodid / 48,
+                            participantid,
+                            cp.regionid,
+                            cp.tcpid)
+         GROUP BY datetime,
+                  state,
+                  participantid,
+                  tcpid;
 
 
-      log_message ('tp_snap_setcpdata_t INSERT COUNT' || SQL%ROWCOUNT, 'info');
+      log_message ('tp_snap_setcpdata_t INSERT COUNT' || SQL%ROWCOUNT,
+                   'info');
+
       
-      select ((in_finish_date-in_start_date)+1)*48 into v_total_hh_count from dual;
-       
-       select count_hh into v_actual_hh_count from (SELECT state, PARTICIPANTID,tcpid,count(datetime) COUNT_HH,min(datetime),max(datetime)
-       FROM tp_snap_setcpdata_t
-      where datetime > in_start_date and datetime <=in_finish_date
-      GROUP BY state, PARTICIPANTID,tcpid) where rownum <=1;
+     
       
-      
-      if v_total_hh_count=0 then 
-         v_total_hh_count:=1;
-      end if;
-      v_actual_pc:=v_actual_hh_count/v_total_hh_count;
-      update tp_snap_setcpdata_t set mw_inc_forecast = mw / v_actual_pc, mw_adjustment = (mw / v_actual_pc)-mw;
+      SELECT trunc(MAX(DATETIME-1/48)) into v_actual_date  FROM TP_SNAP_SETCPDATA_T;
+      v_actual_pc:=calculate_actual_percent(v_actual_date,in_finish_date); 
+        log_message ('tp_snap_setcpdata_t actual percentage:' || to_char(v_actual_pc,'999.999'),
+                   'info');
+        
+  
+-- only apply extrapolation to current month
+      UPDATE tp_snap_setcpdata_t
+         SET mw_inc_forecast = mw / v_actual_pc,
+             mw_adjustment = (mw / v_actual_pc) - mw
+             where datetime > trunc(in_finish_date,'MON')
+             ;
 
 
-      INSERT INTO tp_snap_ppa_hh (name,
+      INSERT INTO tp_snap_ppa_hh (snapshot_id,
+                                 name,
                                   state,
                                   datetime,
                                   quantity_mw)
-           SELECT name,
-                  state,
-                  datetime,
-                  quantity_mw
-             FROM tradinganalysis.mv_ppa_hh@nets.world
-            WHERE datetime > in_start_date AND datetime <= in_finish_date + 1
-            union all
-            SELECT name,
-                  state,
-                  datetime,
-                  quantity_mw
-             FROM tradinganalysis.MV_GFS_PPA_HH_ACTUAL@nets.world
-            WHERE datetime > in_start_date AND datetime <= in_finish_date + 1;
-         log_message ('tp_snap_ppa_hh INSERT COUNT' || SQL%ROWCOUNT, 'info');
+         select in_snapshot_id,name,
+                state,
+                datetime,
+                quantity_mw from (
+         SELECT name,
+                state,
+                datetime,
+                quantity_mw
+           FROM tradinganalysis.mv_ppa_hh@nets.world
+          WHERE datetime > in_start_date AND datetime <= in_finish_date + 1
+          and name in (select c_value from tp_parameters where name = 'PPA' and active='Y')
+         UNION ALL
+         SELECT name,
+                state,
+                datetime,
+                quantity_mw
+           FROM tradinganalysis.MV_GFS_PPA_HH_ACTUAL@nets.world
+          WHERE datetime > in_start_date AND datetime <= in_finish_date + 1
+          and name in (select c_value from tp_parameters where name = 'PPA' and active='Y')
+          )
+          
+          ;
+
+      log_message ('tp_snap_ppa_hh INSERT COUNT' || SQL%ROWCOUNT, 'info');
       COMMIT;
    EXCEPTION
       WHEN OTHERS
@@ -1825,15 +1866,9 @@ IS
                   a.datetime,
                   a.PEAK_FLAG,
                   SUM (a.QTY) quantity_mwh
-             FROM tp_agg_site_hh a, tp_snap_contracts c, tp_snap_site_table s
-            WHERE     a.CONTRACT_ID = c.CONTRACT_ID
-                  AND c.built = 1
-                  AND a.REV = c.REV
-                  AND a.SNAPSHOT_ID = in_snapshot_id
-                  AND c.SNAPSHOT_ID = a.SNAPSHOT_ID
-                  AND s.SNAPSHOT_ID = a.SNAPSHOT_ID
-                  AND a.SITEID = s.siteid
-                  AND a.DT BETWEEN s.START_DATE AND s.FINISH_DATE
+             FROM tp_agg_site_hh a
+            WHERE     
+                  a.SNAPSHOT_ID = in_snapshot_id
          GROUP BY a.snapshot_id,
                   a.state,
                   a.datetime,
@@ -1858,8 +1893,8 @@ IS
                   a.state,
                   a.datetime,
                   a.peak_flag;
-                  
-                  commit;
+
+      COMMIT;
    END;
 
    PROCEDURE get_mm_volume (in_snapshot_id     IN     NUMBER,
@@ -1870,7 +1905,9 @@ IS
          WITH ppa_hh
               AS (  SELECT state, datetime, SUM (quantity_mw) quantity_mw
                       FROM TEMP_DATA.TP_SNAP_PPA_HH ppa
-                     WHERE name IN (select c_value from tp_parameters where name = 'PPA' and active='Y')
+                     WHERE name IN (SELECT c_value
+                                      FROM tp_parameters
+                                     WHERE name = 'PPA' AND active = 'Y')
                   GROUP BY state, datetime
                   ORDER BY datetime)
            SELECT state, SUM (mm_mwh) mm_mwh
@@ -2118,8 +2155,7 @@ IS
                               LOAD_OFFPEAK,
                            a.dt AS period
                       FROM v_agg_journal_month a
-                     WHERE 
-                           (   (    FRMP <> 'CNRGY'
+                     WHERE (   (    FRMP <> 'CNRGY'
                                 AND FRMP <> 'PACPOWER'
                                 AND FRMP <> 'CRNGY'
                                 AND FRMP <> 'INTLENGY')
@@ -2459,425 +2495,884 @@ IS
       COMMIT;
    END;
 
-   
+
    PROCEDURE get_ppa_volume (p_snapshot_id      IN     NUMBER,
-                                     out_load_request      OUT SYS_REFCURSOR)
+                             out_load_request      OUT SYS_REFCURSOR)
    IS
    BEGIN
+      OPEN out_load_request FOR
+           SELECT state,
+                  name,
+                  datetime,
+                  SUM (quantity_mw) quantity_mw
+             FROM TEMP_DATA.TP_SNAP_PPA_HH ppa
+            WHERE name IN ('PPA_BLAYNEY',
+                           'PPA_CROOKWELL',
+                           'PPA_TAHMOOR',
+                           'PPA_APPIN',
+                           'PPA_SMITHFIELD',
+                           'PPA_CHALLICUM',
+                           'PPA_HAMPTON_PARK',
+                           'PPA_BORAL',
+                           'PPA_EASTERN_CREEK',
+                           'PPA_ARROW')
+         GROUP BY state, name, datetime
+         ORDER BY name, datetime;
+   END;
    
-      open out_load_request for
-    SELECT state, name, datetime, SUM (quantity_mw) quantity_mw
-                      FROM TEMP_DATA.TP_SNAP_PPA_HH ppa
-                     WHERE name IN ('PPA_BLAYNEY',
-                                    'PPA_CROOKWELL',
-                                    'PPA_TAHMOOR',
-                                    'PPA_APPIN',
-                                    'PPA_SMITHFIELD',
-                                    'PPA_CHALLICUM',
-                                    'PPA_HAMPTON_PARK',
-                                    'PPA_BORAL',
-                                    'PPA_EASTERN_CREEK',
-                                    'PPA_ARROW')
-                  GROUP BY state, name,datetime
-                  ORDER BY name,datetime;
-   end;
+  
 
    PROCEDURE additional_adjustment (in_snapshot_id   IN NUMBER,
                                     in_start_date    IN DATE,
                                     in_finish_date   IN DATE)
    IS
-      v_actual_count   number(8);
-      v_total_hh_count number(8);
-      v_actual_pc number;
+      v_actual_date     date;
+      v_actual_pc        NUMBER;
    BEGIN
-     
-      
-      
-        log_message ('additional adjustment ', 'info');
-        
-        begin
-        
-        EXECUTE IMMEDIATE 'TRUNCATE TABLE TEMP_DATA.TP_ADJUSTMENT_TEMP';
-        EXECUTE IMMEDIATE 'TRUNCATE TABLE TEMP_DATA.TP_ADJUSTMENT';
-        EXECUTE IMMEDIATE 'TRUNCATE TABLE TEMP_DATA.tp_actual_pc';
+      log_message ('additional adjustment ', 'info');
 
-     
- 
+      BEGIN
+         EXECUTE IMMEDIATE 'TRUNCATE TABLE TEMP_DATA.TP_ADJUSTMENT_TEMP';
 
-      INSERT INTO TEMP_DATA.TP_ADJUSTMENT_TEMP (snapshot_id,
-                                                FRMP,
-                                                STATE,
-                                                CONTRACT_NAME,
-                                                PORTFOLIO,
-                                                BUSINESS_UNIT,
-                                                LNSP,
-                                                TNI,
-                                                DEFAULT_TARIFF_CODE,
-                                                DESCRIPTION,
-                                                CONTRACT_TYPE,
-                                                CONTRACT_ID,
-                                                datetime,
-                                                SETTLED,
-                                                STATUS_PC,
-                                                SITE_ID,
-                                                NMI,
-                                                SITE,
-                                                TYPE_FLAG,
-                                                COUNTERPARTY)
-           SELECT in_snapshot_id,
-                  CASE asd.frmp WHEN 'CRNGY' THEN 'CNRGY' ELSE asd.frmp END
-                     frmp,
-                  asd.state,
-                  sc.contract_name,
-                  CASE
-                     WHEN sc.CONTRACT_TYPE = 'CIDSUMMARY'
-                     THEN
-                        CASE asd.FRMP
-                           WHEN 'ENERGEX' THEN 'SUNRETAIL'
-                           WHEN 'CITIP' THEN 'CITIPOWER'
-                           ELSE asd.FRMP
-                        END
-                     ELSE
-                        sc.portfolio
-                  END
-                     PORTFOLIO,
-                  sc.business_unit,
-                  asd.lnsp,
-                  sst.tni,
-                  sst.derived_default_tariff_code AS default_tariff_code,
-                  sc.derived_description description,
-                  sc.contract_type,
-                  sc.contract_id,
-                  TRUNC (asd.dt, 'MON') Period_start,
-                  ROUND (SUM (asd.qty), 5) settled,
-                  1 - AVG (asd.lp_avg) Status_PC,
-                  asd.siteid AS site_id,
-                  asd.nmi,
-                  sst.site,
-                  sst.type_flag,
-                  scp.cp_name
-             FROM tp_snap_site_table sst
-                  INNER JOIN v_agg_site_day asd
-                     ON     sst.siteid = asd.siteid
-                        AND asd.dt BETWEEN sst.start_date AND sst.finish_date
-                  INNER JOIN tp_snap_contract_complete sc
-                     ON asd.contract_id = sc.contract_id
-                     and asd.rev = sc.rev
-                  JOIN tp_snap_counterparty scp
-                     ON     scp.snapshot_id = sst.snapshot_id
-                        AND sc.cp_id = scp.cp_id
-            WHERE     sst.snapshot_id = in_snapshot_id
-                  AND asd.snapshot_id = in_snapshot_id
-                  AND sc.snapshot_id = in_snapshot_id
-                  AND sc.built = 1
-                  AND asd.state IN ('NSW',
-                                    'VIC',
-                                    'QLD',
-                                    'SA')
-                                  and sc.cp_id in (SELECT n_value FROM TP_PARAMETERS WHERE NAME = 'FPP_COUNTERPARTY_ID' and c_value='Y')
-         GROUP BY asd.frmp,
-                  asd.state,
-                  sc.contract_name,
-                  sc.portfolio,
-                  sc.business_unit,
-                  asd.lnsp,
-                  sst.tni,
-                  sst.derived_default_tariff_code,
-                  sst.DEFAULT_CODE_OVERRIDE,
-                  sc.contract_type,
-                  sc.contract_id,
-                  sc.derived_description,
-                  TRUNC (asd.dt, 'MON'),
-                  month_num,
-                  asd.siteid,
-                  asd.nmi,
-                  sst.site,
-                  sst.type_flag,
-                  scp.cp_name;
+         EXECUTE IMMEDIATE 'TRUNCATE TABLE TEMP_DATA.TP_ADJUSTMENT';
 
-
-      INSERT INTO tp_adjustment (SNAPSHOT_ID, 
-      CATEGORY, 
-      LOAD_ACTUAL, 
-      DATETIME, 
-      STATE, 
-      LOAD_INC_FORECAST, 
-      LOAD_ADJUSTMENT, 
-      COUNTERPARTY 
-      )
-         SELECT snapshot_id,
-                'FPP',
-                settled,
-                datetime,
-                state,
-                setted_forecast,
-                setted_forecast - settled,
-                counterparty
-           FROM (  SELECT snapshot_id,
-                          counterparty,
-                          datetime,
-                          SUM (
-                             CASE
-                                WHEN status_pc = 0 THEN settled
-                                ELSE settled / status_pc
-                             END)
-                             setted_forecast,
-                          state,
-                          SUM (settled) settled
-                     FROM tp_adjUSTMENT_temp
-                     where snapshot_id = in_snapshot_id
-                 GROUP BY snapshot_id,
-                          counterparty,
-                          datetime,
-                          state
-                          );
-                          
-       log_message ('FPP contracts COUNT' || SQL%ROWCOUNT,
-                   'info');
-           EXCEPTION
-      WHEN OTHERS
-      THEN
-         raise_application_error (-20999,  SQLERRM);
-         log_message (err_stack,
-                   'error');  
-                      
-      end;
-      
-      commit;
-                   
-       begin
-                          
-    select /* driving_site(md) */ 
-                                 count(md.datetime) into v_actual_count
-                                 from
-                                  tp_meterdata md
-                     where md.nmi10='SRSWWRWTH1' and
-                                 md.day >= in_start_date and md.day <= in_finish_date;
-    -- work out the percentage actual to forecast
-    select ((in_finish_date-in_start_date)+1)*48 into v_total_hh_count from dual;
-                                 
-    v_actual_pc:=(v_actual_count/v_total_hh_count);
-     
-   
-                                 
-                                  INSERT INTO tp_adjustment (SNAPSHOT_ID, 
-                                  CATEGORY, 
-                                  LOAD_ACTUAL, 
-                                  DATETIME, 
-                                  STATE, 
-                                  LOAD_INC_FORECAST, 
-                                  LOAD_ADJUSTMENT, 
-                                  COUNTERPARTY)
-                                                              select /* driving_site(md) */ in_snapshot_id,'ALTONA',
-                                                              SUM(MD.E_ENERGY) / 1000 load_actual,
-                                 trunc(md.day,'MON') datetime,
-                                 'SA' state,
-                                 (SUM(MD.E_ENERGY)/NVL(v_actual_pc,1))/1000 load_forecast ,
-                                 ((SUM(MD.E_ENERGY)/NVL(v_actual_pc,1))- SUM(MD.E_ENERGY))/1000,
-                                 'ALTONA'
-                                 from
-                                  tp_meterdata md
-                                 where md.nmi10='SRSWWRWTH1' and
-                                 md.day >= in_start_date and md.day <= in_finish_date
-                                 GROUP BY
-                                 trunc(md.day,'MON') ;
-                                 
-                               
-                                   
-                                 
-     log_message ('ALTONA COUNT' || SQL%ROWCOUNT,
-                   'info');                   
-     
-        EXCEPTION
-      WHEN OTHERS
-      THEN
-         raise_application_error (-20999,  SQLERRM);
-         log_message (err_stack,
-                   'error');  
-                      
-      end;
-      
-   
-      
-   END;
+         INSERT INTO TEMP_DATA.TP_ADJUSTMENT_TEMP (snapshot_id,
+                                                   FRMP,
+                                                   STATE,
+                                                   CONTRACT_NAME,
+                                                   PORTFOLIO,
+                                                   BUSINESS_UNIT,
+                                                   LNSP,
+                                                   TNI,
+                                                   DEFAULT_TARIFF_CODE,
+                                                   DESCRIPTION,
+                                                   CONTRACT_TYPE,
+                                                   CONTRACT_ID,
+                                                   datetime,
+                                                   SETTLED,
+                                                   STATUS_PC,
+                                                   SITE_ID,
+                                                   NMI,
+                                                   SITE,
+                                                   TYPE_FLAG,
+                                                   COUNTERPARTY)
+              SELECT in_snapshot_id,
+                     CASE asd.frmp WHEN 'CRNGY' THEN 'CNRGY' ELSE asd.frmp END
+                        frmp,
+                     asd.state,
+                     sc.contract_name,
+                     CASE
+                        WHEN sc.CONTRACT_TYPE = 'CIDSUMMARY'
+                        THEN
+                           CASE asd.FRMP
+                              WHEN 'ENERGEX' THEN 'SUNRETAIL'
+                              WHEN 'CITIP' THEN 'CITIPOWER'
+                              ELSE asd.FRMP
+                           END
+                        ELSE
+                           sc.portfolio
+                     END
+                        PORTFOLIO,
+                     sc.business_unit,
+                     asd.lnsp,
+                     sst.tni,
+                     sst.derived_default_tariff_code AS default_tariff_code,
+                       tp.description,
+                  --   sc.derived_description description,
+                     sc.contract_type,
+                     sc.contract_id,
+                     TRUNC (asd.dt, 'MON') Period_start,
+                     ROUND (SUM (asd.qty), 5) settled,
+                     1 - AVG (asd.lp_avg) Status_PC,
+                     asd.siteid AS site_id,
+                     asd.nmi,
+                     sst.site,
+                     sst.type_flag,
+                     scp.cp_name
+                FROM tp_snap_site_table sst
+                     INNER JOIN v_agg_site_day asd
+                        ON     sst.siteid = asd.siteid
+                           AND asd.dt BETWEEN sst.start_date
+                                          AND sst.finish_date
+                     INNER JOIN tp_snap_contract_complete sc
+                        ON     asd.contract_id = sc.contract_id
+                           AND asd.rev = sc.rev
+                     JOIN tp_snap_counterparty scp
+                        ON     scp.snapshot_id = sst.snapshot_id
+                           AND sc.cp_id = scp.cp_id
+                           join TP_PARAMETERS tp on
+                           scp.cp_id = tp.n_value
+               WHERE     sst.snapshot_id = in_snapshot_id
+                     AND asd.snapshot_id = in_snapshot_id
+                     AND sc.snapshot_id = in_snapshot_id
+                     and asd.dt >= in_start_date and asd.dt <= in_finish_date
+                     AND sc.built = 1
+                     AND asd.state IN ('NSW',
+                                       'VIC',
+                                       'QLD',
+                                       'SA')
+                     AND tp.NAME = 'COUNTERPARTY_ID'
+                                             AND c_value = 'Y'
+            GROUP BY asd.frmp,
+                     asd.state,
+                     sc.contract_name,
+                     sc.portfolio,
+                     sc.business_unit,
+                     asd.lnsp,
+                     sst.tni,
+                     sst.derived_default_tariff_code,
+                     sst.DEFAULT_CODE_OVERRIDE,
+                     sc.contract_type,
+                     sc.contract_id,
+                     tp.description,
+                     TRUNC (asd.dt, 'MON'),
+                     month_num,
+                     asd.siteid,
+                     asd.nmi,
+                     sst.site,
+                     sst.type_flag,
+                     scp.cp_name;
 
 
+         INSERT INTO tp_adjustment (SNAPSHOT_ID,
+                                    CATEGORY,
+                                    LOAD_ACTUAL,
+                                    DATETIME,
+                                    STATE,
+                                    LOAD_INC_FORECAST,
+                                    LOAD_ADJUSTMENT,
+                                    COUNTERPARTY)
+            SELECT snapshot_id,
+                   description,
+                   settled,
+                   datetime,
+                   state,
+                   setted_forecast,
+                   setted_forecast - settled,
+                   counterparty
+              FROM (  SELECT snapshot_id,
+                             counterparty,
+                             datetime,
+                             SUM (
+                                CASE
+                                   WHEN status_pc = 0 THEN settled
+                                   ELSE settled / status_pc
+                                END)
+                                setted_forecast,
+                             state,
+                             description,
+                             SUM (settled) settled
+                        FROM tp_adjUSTMENT_temp
+                       WHERE snapshot_id = in_snapshot_id
+                    GROUP BY snapshot_id,
+                             counterparty,
+                             datetime,
+                             state,
+                             description
+                             );
 
- /* Formatted on 19/10/2015 11:34:18 AM (QP5 v5.269.14213.34769) */
-PROCEDURE run_snapshot
-IS
-   IN_SNAPSHOT_ID        NUMBER;
-   IN_START_DATE         DATE;
-   IN_FINISH_DATE        DATE;
-   IN_SNAP_CONTRACT      VARCHAR2 (2) := 'N';
-   IN_SNAP_REF_TABLES    VARCHAR2 (2) := 'N';
-   IN_SNAP_HH_RETAIL     VARCHAR2 (2) := 'N';
-   IN_SNAP_RETAIL_SITE   VARCHAR2 (2) := 'N';
-   IN_SNAP_SMETER        VARCHAR2 (2) := 'N';
-   IN_SNAP_LP            VARCHAR2 (2) := 'N';
-   IN_AGG_CID            VARCHAR2 (2);
-   IN_AGG_SITE_HH        VARCHAR2 (2);
-   IN_APPLY_METERDATA    VARCHAR2 (2);
-   IN_APPLY_LP           VARCHAR2 (2);
-   IN_CLEANUP_ACT        VARCHAR2 (2);
-   IN_GATHER_STATS       VARCHAR2 (2);
-   V_SNAPSHOT_DATA       TP_PARAMETERS.C_VALUE%TYPE;
-BEGIN
-   BEGIN
-      SELECT TRUNC (d_value)
-        INTO in_start_date
-        FROM tp_parameters
-       WHERE name = 'SNAPSHOT_START_DATE' and rownum <=1;
-
-      SELECT TRUNC (d_value)
-        INTO in_FINISH_date
-        FROM tp_parameters
-       WHERE name = 'SNAPSHOT_FINISH_DATE' and rownum <=1;
-   EXCEPTION
-      WHEN NO_DATA_FOUND
-      THEN
-         IN_START_DATE := TRUNC (ADD_MONTHS (SYSDATE, -1), 'MON');
-         IN_FINISH_DATE := TRUNC (LAST_DAY (SYSDATE));
-   END;
-
-   BEGIN
-      SELECT C_value
-        INTO V_SNAPSHOT_DATA
-        FROM tp_parameters
-       WHERE name = 'SNAPSHOT_DATA' and rownum <=1;
-   EXCEPTION
-      WHEN NO_DATA_FOUND
-      THEN
-         V_SNAPSHOT_DATA := 'Y';
-   END;
-
-
-
-   IN_SNAPSHOT_ID := TO_NUMBER (TO_CHAR (SYSDATE, 'YYYYMMDD'));
-
-   IF V_SNAPSHOT_DATA = 'Y'
-   THEN
-      IN_SNAP_CONTRACT := 'Y';
-      IN_SNAP_REF_TABLES := 'Y';
-      IN_SNAP_HH_RETAIL := 'Y';
-      IN_SNAP_RETAIL_SITE := 'Y';
-      IN_SNAP_SMETER := 'Y';
-      IN_SNAP_LP := 'Y';
-   END IF;
-
-   IN_AGG_CID := 'Y';
-   IN_AGG_SITE_HH := 'Y';
-   IN_APPLY_METERDATA := 'Y';
-   IN_APPLY_LP := 'Y';
-   IN_CLEANUP_ACT := 'Y';
-   IN_GATHER_STATS := 'Y';
-
-   log_message (
-         'Snapshot start '
-      || IN_SNAPSHOT_ID
-      || 'START_DATE:'
-      || IN_START_DATE
-      || ' FINISH_DATE:'
-      || IN_FINISH_DATE,
-      'info');
-   TEMP_DATA.PKG_TP_SNAPSHOT.DO_SNAPSHOT (IN_SNAPSHOT_ID,
-                                          IN_START_DATE,
-                                          IN_FINISH_DATE,
-                                          IN_GATHER_STATS,
-                                          IN_SNAP_CONTRACT,
-                                          IN_SNAP_REF_TABLES,
-                                          IN_SNAP_HH_RETAIL,
-                                          IN_SNAP_RETAIL_SITE,
-                                          IN_SNAP_SMETER,
-                                          IN_SNAP_LP,
-                                          IN_AGG_CID,
-                                          IN_AGG_SITE_HH,
-                                          IN_APPLY_METERDATA,
-                                          IN_APPLY_LP,
-                                          IN_CLEANUP_ACT);
-   log_message (
-         'Snapshot finished '
-      || IN_SNAPSHOT_ID
-      || 'START_DATE:'
-      || IN_START_DATE
-      || ' FINISH_DATE:'
-      || IN_FINISH_DATE,
-      'info');
-   COMMIT;
-END;
-   
-   procedure get_netsrepp_data(in_snapshot_id   IN NUMBER,
-                                     in_start_date    IN DATE,
-                                     in_finish_date   IN DATE)
-   is
-   begin
-   
-  
-         FOR rec IN (SELECT table_name
-                       FROM user_tables
-                      WHERE table_name IN (
-'TP_SNAP_CALENDAR_HH'
-,'TP_SNAP_CONTRACTS'
-,'TP_SNAP_CONTRACT_COMPLETE'
-,'TP_SNAP_HH_RETAIL'
-,'TP_SNAP_LOAD_PROFILE'
-,'TP_SNAP_NMI'
-,'TP_SNAP_RETAIL_COMPLETE'
-,'TP_SNAP_RETAIL_SITE'
-,'TP_SNAP_SITEMETERDATA'
-,'TP_SNAP_SITE_TABLE'
-                                           ))
-         LOOP
-            EXECUTE IMMEDIATE 'truncate table  ' || rec.table_name;
-         END LOOP;
+         log_message ('Adjustment COUNT:' || SQL%ROWCOUNT, 'info');
       EXCEPTION
          WHEN OTHERS
          THEN
-            log_message (err_stack, 'info');
-      
-   
-    insert into tp_snap_calendar_hh 
-    select * from retail.snap_calendar_hh@netsrepp.world where snapshot_id = in_snapshot_id
-    AND DATETIME > in_start_date and datetime <= in_finish_date+1;
-    
-    
-    insert into TEMP_DATA.TP_SNAP_CONTRACTS
-      select * from retail.SNAP_CONTRACT@netsrepp.world where SNAPSHOT_ID = in_snapshot_id;
-      
-    insert into TEMP_DATA.TP_SNAP_CONTRACT_COMPLETE
-   select * from retail.SNAP_CONTRACT_COMPLETE@netsrepp.world where SNAPSHOT_ID =in_snapshot_id;
-   
-   insert into TEMP_DATA.TP_SNAP_HH_RETAIL
- select * from retail.SNAP_HH_RETAIL@netsrepp.world where SNAPSHOT_ID = in_snapshot_id
-    AND DATETIME > in_start_date and datetime <= in_finish_date+1;
-    
-    insert into TP_SNAP_load_profile(SNAPSHOT_ID, SITEID, PERIOD_CODE, DAY_CODE, HH, VALUE, CHANGE_DATE, STD_DEV, MM_VALUE) 
-    select in_SNAPSHOT_ID, SITEID, PERIOD_CODE, DAY_CODE, HH, VALUE, CHANGE_DATE, STD_DEV, MM_VALUE from retail.snap_load_profile@netsrepp.world where snapshot_id = in_snapshot_id and period_code=to_char(in_start_date,'MON');
-    
-    insert into TP_SNAP_nmi(SNAPSHOT_ID, NMI, START_DATE, FINISH_DATE, TNI, FRMP, STATE, LR, LNSP, CLASS_CODE, METER_INSTALL_CODE, DLF_CODE, CHANGED_DATE, CHANGED_BY) 
-    select in_SNAPSHOT_ID, NMI, START_DATE, FINISH_DATE, TNI, FRMP, STATE, LR, LNSP, CLASS_CODE, METER_INSTALL_CODE, DLF_CODE, CHANGED_DATE, CHANGED_BY 
-    from retail.snap_nmi@netsrepp.world where snapshot_id = in_snapshot_id;
-    
-    insert into TP_SNAP_RETAIL_COMPLETE(SNAPSHOT_ID, CONTRACT_ID, REV, STATE, LOAD_VARIANCE, ROLL_IN_ROLL_OUT, LOADSHEDDING, EXTENSION, MEET_THE_MARKET, DEFAULT_TARIFF_CODE, AGG_KEY)
-    select SNAPSHOT_ID, CONTRACT_ID, REV, STATE, LOAD_VARIANCE, ROLL_IN_ROLL_OUT, LOADSHEDDING, EXTENSION, MEET_THE_MARKET, DEFAULT_TARIFF_CODE, AGG_KEY 
-    from retail.snap_retail_complete@netsrepp.world where snapshot_id = in_snapshot_id;  
-    
-    insert into tp_snap_retail_site(SNAPSHOT_ID, CONTRACT_ID, REV, SITEID, START_DATE, FINISH_DATE, CONTRACT_VOLUME_ESTIMATE) 
-    select in_SNAPSHOT_ID, CONTRACT_ID, REV, SITEID, START_DATE, FINISH_DATE, CONTRACT_VOLUME_ESTIMATE from retail.snap_retail_site@netsrepp.world where snapshot_id = in_snapshot_id;    
+            raise_application_error (-20999, SQLERRM);
+            log_message (err_stack, 'error');
+      END;
 
-    insert into tp_snap_sitemeterdata(SNAPSHOT_ID, DATETIME, MONTH_NUM, SITEID, DEMAND, CHANGE_DATE, SETTLED, STATUS) 
-    select in_snapshot_id, DATETIME, MONTH_NUM, SITEID, DEMAND, CHANGE_DATE, SETTLED, STATUS from retail.snap_sitemeterdata@netsrepp.world where snapshot_id = in_snapshot_id
-    AND DATETIME > in_start_date and datetime <= in_finish_date+1;
-    
-    insert into TP_SNAP_site_table(
-    SNAPSHOT_ID, SITEID, SITE, STATE, START_DATE, FINISH_DATE, TNI, MDA, NMI, FRMP, TYPE_FLAG, METERTYPE, PAM_SITECODE, LNSP, HOLIDAYS, DLFCODE, CHANGED_BY, CHANGED_DATE, LP, BUSINESS_UNIT, DEFAULT_CODE_OVERRIDE, NMI_STATUS_CODE_ID, STREAM_FLAG, DERIVED_DEFAULT_TARIFF_CODE
-    ) select
-    in_snapshot_id, SITEID, SITE, STATE, START_DATE, FINISH_DATE, TNI, MDA, NMI, FRMP, TYPE_FLAG, METERTYPE, PAM_SITECODE, LNSP, HOLIDAYS, DLFCODE, CHANGED_BY, CHANGED_DATE, LP, BUSINESS_UNIT, DEFAULT_CODE_OVERRIDE, NMI_STATUS_CODE_ID, STREAM_FLAG, DERIVED_DEFAULT_TARIFF_CODE 
-     from retail.snap_site_table@netsrepp.world where snapshot_id = in_snapshot_id;
-     
-     commit;
-                                        
-    end;
-   
+      COMMIT;
+
+      BEGIN
+         SELECT                                         /* driving_site(md) */
+               max (md.datetime) 
+           INTO v_actual_date
+           FROM tp_meterdata md
+          WHERE     md.nmi10 = 'SRSWWRWTH1'
+                AND md.day >= in_start_date
+                AND md.day <= in_finish_date;
+
+         -- work out the percentage actual to forecast
+      v_actual_pc:=calculate_actual_percent(v_actual_date,in_finish_date);   
+
+
+
+
+
+         INSERT INTO tp_adjustment (SNAPSHOT_ID,
+                                    CATEGORY,
+                                    LOAD_ACTUAL,
+                                    DATETIME,
+                                    STATE,
+                                    LOAD_INC_FORECAST,
+                                    LOAD_ADJUSTMENT,
+                                    COUNTERPARTY)
+               
+              SELECT /* driving_site(md) */                                    
+                    in_snapshot_id snapshot_id,category,load_actual,datetime,state,load_forecast,load_forecast,counterparty from 
+                    (
+                    select
+                     'ALTONA' category,
+                     SUM (MD.E_ENERGY) / 1000 load_actual,
+                     TRUNC (md.day, 'MON') datetime,
+                     'SA' state,
+                     (SUM (MD.E_ENERGY) / NVL (v_actual_pc, 1)) / 1000
+                        load_forecast,
+                       (  (SUM (MD.E_ENERGY) / NVL (v_actual_pc, 1))
+                        - SUM (MD.E_ENERGY)) 
+                     / 1000 adj,
+                     'ALTONA' counterparty
+                FROM tp_meterdata md
+               WHERE     md.nmi10 = 'SRSWWRWTH1'
+                     AND md.day >= in_start_date
+                     AND md.day <= in_finish_date
+            GROUP BY TRUNC (md.day, 'MON'))
+            ;
+
+
+
+         log_message ('ALTONA COUNT:' || SQL%ROWCOUNT, 'info');
+      EXCEPTION
+         WHEN OTHERS
+         THEN
+            raise_application_error (-20999, SQLERRM);
+            log_message (err_stack, 'error');
+      END;
+   END;
+
+
+
+   PROCEDURE run_snapshot
+   IS
+      IN_SNAPSHOT_ID        NUMBER;
+      IN_START_DATE         DATE;
+      IN_FINISH_DATE        DATE;
+      IN_SNAP_CONTRACT      VARCHAR2 (2) := 'N';
+      IN_SNAP_REF_TABLES    VARCHAR2 (2) := 'N';
+      IN_SNAP_HH_RETAIL     VARCHAR2 (2) := 'N';
+      IN_SNAP_RETAIL_SITE   VARCHAR2 (2) := 'N';
+      IN_SNAP_SMETER        VARCHAR2 (2) := 'N';
+      IN_SNAP_LP            VARCHAR2 (2) := 'N';
+      IN_AGG_CID            VARCHAR2 (2);
+      IN_AGG_SITE_HH        VARCHAR2 (2);
+      IN_APPLY_METERDATA    VARCHAR2 (2);
+      IN_APPLY_LP           VARCHAR2 (2);
+      IN_CLEANUP_ACT        VARCHAR2 (2);
+      IN_GATHER_STATS       VARCHAR2 (2);
+      V_SNAPSHOT_DATA       TP_PARAMETERS.C_VALUE%TYPE;
+   BEGIN
+      BEGIN
+         SELECT TRUNC (d_value)
+           INTO in_start_date
+           FROM tp_parameters
+          WHERE name = 'SNAPSHOT_START_DATE' AND ROWNUM <= 1;
+
+         SELECT TRUNC (d_value)
+           INTO in_FINISH_date
+           FROM tp_parameters
+          WHERE name = 'SNAPSHOT_FINISH_DATE' AND ROWNUM <= 1;
+      EXCEPTION
+         WHEN NO_DATA_FOUND
+         THEN
+            IN_START_DATE := TRUNC (ADD_MONTHS (SYSDATE, -1), 'MON');
+            in_FINISH_date := TRUNC (LAST_DAY (SYSDATE));
+      END;
+
+      BEGIN
+         SELECT C_value
+           INTO V_SNAPSHOT_DATA
+           FROM tp_parameters
+          WHERE name = 'SNAPSHOT_DATA' AND ROWNUM <= 1;
+      EXCEPTION
+         WHEN NO_DATA_FOUND
+         THEN
+            V_SNAPSHOT_DATA := 'Y';
+      END;
+
+
+
+      IN_SNAPSHOT_ID := TO_NUMBER (TO_CHAR (SYSDATE, 'YYYYMMDD'));
+      
+      insert into tp_snapshot(
+      SNAPSHOT_ID, SNAPSHOT_DATE,  START_DATE, FINISH_DATE, SCHEDULED_BY, STATUS
+      )
+      values
+      (IN_SNAPSHOT_ID,sysdate,IN_START_DATE,in_FINISH_date,user,'RUNNING');
+
+      IF V_SNAPSHOT_DATA = 'Y'
+      THEN
+         IN_SNAP_CONTRACT := 'Y';
+         IN_SNAP_REF_TABLES := 'Y';
+         IN_SNAP_HH_RETAIL := 'Y';
+         IN_SNAP_RETAIL_SITE := 'Y';
+         IN_SNAP_SMETER := 'Y';
+         IN_SNAP_LP := 'Y';
+      END IF;
+
+      IN_AGG_CID := 'Y';
+      IN_AGG_SITE_HH := 'Y';
+      IN_APPLY_METERDATA := 'Y';
+      IN_APPLY_LP := 'Y';
+      IN_CLEANUP_ACT := 'Y';
+      IN_GATHER_STATS := 'Y';
+
+      log_message (
+            'Snapshot start '
+         || IN_SNAPSHOT_ID
+         || 'START_DATE:'
+         || IN_START_DATE
+         || ' FINISH_DATE:'
+         || IN_FINISH_DATE,
+         'info');
+      TEMP_DATA.PKG_TP_SNAPSHOT.DO_SNAPSHOT (IN_SNAPSHOT_ID,
+                                             IN_START_DATE,
+                                             IN_FINISH_DATE,
+                                             IN_GATHER_STATS,
+                                             IN_SNAP_CONTRACT,
+                                             IN_SNAP_REF_TABLES,
+                                             IN_SNAP_HH_RETAIL,
+                                             IN_SNAP_RETAIL_SITE,
+                                             IN_SNAP_SMETER,
+                                             IN_SNAP_LP,
+                                             IN_AGG_CID,
+                                             IN_AGG_SITE_HH,
+                                             IN_APPLY_METERDATA,
+                                             IN_APPLY_LP,
+                                             IN_CLEANUP_ACT);
+      log_message (
+            'Snapshot finished '
+         || IN_SNAPSHOT_ID
+         || 'START_DATE:'
+         || IN_START_DATE
+         || ' FINISH_DATE:'
+         || IN_FINISH_DATE,
+         'info');
+         
+      UPDATE TP_SNAPSHOT SET STATUS = 'COMPLETE' WHERE SNAPSHOT_ID =   IN_SNAPSHOT_ID; 
+      COMMIT;
+   END;
+
+   PROCEDURE get_netsrepp_data (in_snapshot_id   IN NUMBER,
+                                in_start_date    IN DATE,
+                                in_finish_date   IN DATE)
+   IS
+   BEGIN
+      FOR rec IN (SELECT table_name
+                    FROM user_tables
+                   WHERE table_name IN ('TP_SNAP_CALENDAR_HH',
+                                        'TP_SNAP_CONTRACTS',
+                                        'TP_SNAP_CONTRACT_COMPLETE',
+                                        'TP_SNAP_HH_RETAIL',
+                                        'TP_SNAP_LOAD_PROFILE',
+                                        'TP_SNAP_NMI',
+                                        'TP_SNAP_RETAIL_COMPLETE',
+                                        'TP_SNAP_RETAIL_SITE',
+                                        'TP_SNAP_SITEMETERDATA',
+                                        'TP_SNAP_SITE_TABLE'))
+      LOOP
+         EXECUTE IMMEDIATE 'truncate table  ' || rec.table_name;
+      END LOOP;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         log_message (err_stack, 'info');
+
+
+         INSERT INTO tp_snap_calendar_hh
+            SELECT *
+              FROM retail.snap_calendar_hh@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+
+         INSERT INTO TEMP_DATA.TP_SNAP_CONTRACTS
+            SELECT *
+              FROM retail.SNAP_CONTRACT@netsrepp.world
+             WHERE SNAPSHOT_ID = in_snapshot_id;
+
+         INSERT INTO TEMP_DATA.TP_SNAP_CONTRACT_COMPLETE
+            SELECT *
+              FROM retail.SNAP_CONTRACT_COMPLETE@netsrepp.world
+             WHERE SNAPSHOT_ID = in_snapshot_id;
+
+         INSERT INTO TEMP_DATA.TP_SNAP_HH_RETAIL
+            SELECT *
+              FROM retail.SNAP_HH_RETAIL@netsrepp.world
+             WHERE     SNAPSHOT_ID = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+         INSERT INTO TP_SNAP_load_profile (SNAPSHOT_ID,
+                                           SITEID,
+                                           PERIOD_CODE,
+                                           DAY_CODE,
+                                           HH,
+                                           VALUE,
+                                           CHANGE_DATE,
+                                           STD_DEV,
+                                           MM_VALUE)
+            SELECT in_SNAPSHOT_ID,
+                   SITEID,
+                   PERIOD_CODE,
+                   DAY_CODE,
+                   HH,
+                   VALUE,
+                   CHANGE_DATE,
+                   STD_DEV,
+                   MM_VALUE
+              FROM retail.snap_load_profile@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND period_code = TO_CHAR (in_start_date, 'MON');
+
+         INSERT INTO TP_SNAP_nmi (SNAPSHOT_ID,
+                                  NMI,
+                                  START_DATE,
+                                  FINISH_DATE,
+                                  TNI,
+                                  FRMP,
+                                  STATE,
+                                  LR,
+                                  LNSP,
+                                  CLASS_CODE,
+                                  METER_INSTALL_CODE,
+                                  DLF_CODE,
+                                  CHANGED_DATE,
+                                  CHANGED_BY)
+            SELECT in_SNAPSHOT_ID,
+                   NMI,
+                   START_DATE,
+                   FINISH_DATE,
+                   TNI,
+                   FRMP,
+                   STATE,
+                   LR,
+                   LNSP,
+                   CLASS_CODE,
+                   METER_INSTALL_CODE,
+                   DLF_CODE,
+                   CHANGED_DATE,
+                   CHANGED_BY
+              FROM retail.snap_nmi@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO TP_SNAP_RETAIL_COMPLETE (SNAPSHOT_ID,
+                                              CONTRACT_ID,
+                                              REV,
+                                              STATE,
+                                              LOAD_VARIANCE,
+                                              ROLL_IN_ROLL_OUT,
+                                              LOADSHEDDING,
+                                              EXTENSION,
+                                              MEET_THE_MARKET,
+                                              DEFAULT_TARIFF_CODE,
+                                              AGG_KEY)
+            SELECT SNAPSHOT_ID,
+                   CONTRACT_ID,
+                   REV,
+                   STATE,
+                   LOAD_VARIANCE,
+                   ROLL_IN_ROLL_OUT,
+                   LOADSHEDDING,
+                   EXTENSION,
+                   MEET_THE_MARKET,
+                   DEFAULT_TARIFF_CODE,
+                   AGG_KEY
+              FROM retail.snap_retail_complete@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO tp_snap_retail_site (SNAPSHOT_ID,
+                                          CONTRACT_ID,
+                                          REV,
+                                          SITEID,
+                                          START_DATE,
+                                          FINISH_DATE,
+                                          CONTRACT_VOLUME_ESTIMATE)
+            SELECT in_SNAPSHOT_ID,
+                   CONTRACT_ID,
+                   REV,
+                   SITEID,
+                   START_DATE,
+                   FINISH_DATE,
+                   CONTRACT_VOLUME_ESTIMATE
+              FROM retail.snap_retail_site@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO tp_snap_sitemeterdata (SNAPSHOT_ID,
+                                            DATETIME,
+                                            MONTH_NUM,
+                                            SITEID,
+                                            DEMAND,
+                                            CHANGE_DATE,
+                                            SETTLED,
+                                            STATUS)
+            SELECT in_snapshot_id,
+                   DATETIME,
+                   MONTH_NUM,
+                   SITEID,
+                   DEMAND,
+                   CHANGE_DATE,
+                   SETTLED,
+                   STATUS
+              FROM retail.snap_sitemeterdata@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+         INSERT INTO TP_SNAP_site_table (SNAPSHOT_ID,
+                                         SITEID,
+                                         SITE,
+                                         STATE,
+                                         START_DATE,
+                                         FINISH_DATE,
+                                         TNI,
+                                         MDA,
+                                         NMI,
+                                         FRMP,
+                                         TYPE_FLAG,
+                                         METERTYPE,
+                                         PAM_SITECODE,
+                                         LNSP,
+                                         HOLIDAYS,
+                                         DLFCODE,
+                                         CHANGED_BY,
+                                         CHANGED_DATE,
+                                         LP,
+                                         BUSINESS_UNIT,
+                                         DEFAULT_CODE_OVERRIDE,
+                                         NMI_STATUS_CODE_ID,
+                                         STREAM_FLAG,
+                                         DERIVED_DEFAULT_TARIFF_CODE)
+            SELECT in_snapshot_id,
+                   SITEID,
+                   SITE,
+                   STATE,
+                   START_DATE,
+                   FINISH_DATE,
+                   TNI,
+                   MDA,
+                   NMI,
+                   FRMP,
+                   TYPE_FLAG,
+                   METERTYPE,
+                   PAM_SITECODE,
+                   LNSP,
+                   HOLIDAYS,
+                   DLFCODE,
+                   CHANGED_BY,
+                   CHANGED_DATE,
+                   LP,
+                   BUSINESS_UNIT,
+                   DEFAULT_CODE_OVERRIDE,
+                   NMI_STATUS_CODE_ID,
+                   STREAM_FLAG,
+                   DERIVED_DEFAULT_TARIFF_CODE
+              FROM retail.snap_site_table@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         COMMIT;
+   END;
+
+   PROCEDURE refresh_views(in_snapshot_id   IN NUMBER,
+                              in_start_date    IN DATE,
+                              in_finish_date   IN DATE)
+   IS
+   BEGIN
+         
+         delete TEMP_DATA.TP_CI_ACTUAL_RESULT where snapshot_id = in_snapshot_id;
+         delete TEMP_DATA.TP_ADJUSTMENT_RESULT where snapshot_id = in_snapshot_id;
+         delete TEMP_DATA.TP_PPA_HH_RESULT where snapshot_id = in_snapshot_id;
+         delete TEMP_DATA.TP_SETCPDATA_RESULT where snapshot_id = in_snapshot_id;
+         
+
+         insert into TEMP_DATA.TP_CI_ACTUAL_RESULT(
+         SNAPSHOT_ID, FRMP, PORTFOLIO, STATE, BU_FLAG, CATEGORY, LOAD_PEAK, LOAD_OFFPEAK, PERIOD)
+         WITH counterparty
+              AS (
+                            SELECT snapshot_id,cp_id,
+                         cp_name,
+                         CASE WHEN cp_id IN (-1, 242) THEN 0 ELSE 1 END
+                            cp_flag,
+                         cp_institution_type
+                    FROM tp_snap_counterparty
+                   ),
+              agg_contract_day
+              AS (  SELECT a.snapshot_id,
+                           a.state,
+                           c.CONTRACT_TYPE,
+                           c.CONTRACT_TYPE contract_sub_type,
+                           c.CONTRACT_ID,
+                           c.rev,
+                           a.DT,
+                           a.month_num,
+                           a.PEAK_FLAG,
+                           s.LNSP,
+                           s.FRMP,
+                           SUM (a.QTY) qty
+                      FROM tp_agg_site_hh a,
+                           tp_snap_contracts c,
+                           tp_snap_site_table s
+                     WHERE     a.CONTRACT_ID = c.CONTRACT_ID
+                           AND c.built = 1
+                           AND a.REV = c.REV
+                           --AND a.SNAPSHOT_ID = 20151027
+                           AND c.SNAPSHOT_ID = a.SNAPSHOT_ID
+                           AND s.SNAPSHOT_ID = a.SNAPSHOT_ID
+                           AND a.SITEID = s.siteid
+                           AND a.DT BETWEEN s.START_DATE AND s.FINISH_DATE
+                  GROUP BY a.snapshot_id,
+                           a.SNAPSHOT_TYPE,
+                           a.state,
+                           c.CONTRACT_TYPE,
+                           c.CONTRACT_ID,
+                           c.rev,
+                           a.dt,
+                           a.month_num,
+                           a.PEAK_FLAG,
+                           s.LNSP,
+                           s.FRMP),
+              v_agg_journal_month
+              AS (  SELECT d.snapshot_id,
+                           CASE cp.cp_institution_type
+                              WHEN 'ERM CUSTOMER'
+                              THEN
+                                 'ERM CUSTOMER'
+                              ELSE
+                                 CASE d.contract_type
+                                    WHEN 'MASS_MARKET'
+                                    THEN
+                                       'RETAIL'
+                                    WHEN 'CIDSUMMARY'
+                                    THEN
+                                       CASE
+                                          WHEN c.contract_name LIKE '%RETAIL%'
+                                          THEN
+                                             'RETAIL'
+                                          WHEN c.contract_name LIKE '%ERM%'
+                                          THEN
+                                             'ERM'
+                                          ELSE
+                                             'WHOLESALE'
+                                       END
+                                    WHEN 'WVA'
+                                    THEN
+                                       CASE
+                                          WHEN c.contract_name LIKE 'WHO%'
+                                          THEN
+                                             'WHOLESALE'
+                                          ELSE
+                                             'RETAIL'
+                                       END
+                                    ELSE
+                                       c.contract_name
+                                 END
+                           END
+                              business_unit,
+                           CASE
+                              WHEN d.contract_type IN ('CIDSUMMARY',
+                                                       'MASS_MARKET')
+                              THEN
+                                 DECODE (d.frmp,
+                                         'ENERGEX', 'SUNRETAIL',
+                                         'CITIP', 'CITIPOWER',
+                                         c.portfolio)
+                              WHEN c.portfolio = 'RETAIL'
+                              THEN
+                                 'POWERCOR'
+                              ELSE
+                                 c.portfolio
+                           END
+                              portfolio,
+                           d.state,
+                           d.contract_type,
+                           d.contract_sub_type,
+                           TRUNC (dt, 'MON') dt,
+                           peak_flag,
+                           frmp,
+                           SUM (qty) qty
+                      FROM agg_contract_day d,
+                           tp_snap_contracts c,
+                           tp_snap_counterparty cp
+                     WHERE     c.snapshot_id = d.snapshot_id
+                           AND c.built = 1
+                           AND c.contract_id = d.contract_id
+                           AND c.cp_id = cp.cp_id(+)
+                  GROUP BY d.snapshot_id,
+                           CASE cp.cp_institution_type
+                              WHEN 'ERM CUSTOMER'
+                              THEN
+                                 'ERM CUSTOMER'
+                              ELSE
+                                 CASE d.contract_type
+                                    WHEN 'MASS_MARKET'
+                                    THEN
+                                       'RETAIL'
+                                    WHEN 'CIDSUMMARY'
+                                    THEN
+                                       CASE
+                                          WHEN c.contract_name LIKE
+                                                  '%RETAIL%'
+                                          THEN
+                                             'RETAIL'
+                                          WHEN c.contract_name LIKE '%ERM%'
+                                          THEN
+                                             'ERM'
+                                          ELSE
+                                             'WHOLESALE'
+                                       END
+                                    WHEN 'WVA'
+                                    THEN
+                                       CASE
+                                          WHEN c.contract_name LIKE 'WHO%'
+                                          THEN
+                                             'WHOLESALE'
+                                          ELSE
+                                             'RETAIL'
+                                       END
+                                    ELSE
+                                       c.contract_name
+                                 END
+                           END,
+                           CASE
+                              WHEN d.contract_type IN ('CIDSUMMARY',
+                                                       'MASS_MARKET')
+                              THEN
+                                 DECODE (d.frmp,
+                                         'ENERGEX', 'SUNRETAIL',
+                                         'CITIP', 'CITIPOWER',
+                                         c.portfolio)
+                              WHEN c.portfolio = 'RETAIL'
+                              THEN
+                                 'POWERCOR'
+                              ELSE
+                                 c.portfolio
+                           END,
+                           d.state,
+                           d.contract_type,
+                           d.contract_sub_type,
+                           TRUNC (dt, 'MON'),
+                           peak_flag,
+                           frmp),
+              final_query
+              AS (  SELECT snapshot_id,  CASE FRMP WHEN 'CRNGY' THEN 'CNRGY' ELSE FRMP END
+                              FRMP,
+                           CASE
+                              WHEN CONTRACT_TYPE = 'CIDSUMMARY'
+                              THEN
+                                 CASE FRMP
+                                    WHEN 'ENERGEX' THEN 'SUNRETAIL'
+                                    WHEN 'CITIP' THEN 'CITIPOWER'
+                                    ELSE frmp
+                                 END
+                              ELSE
+                                 PORTFOLIO
+                           END
+                              PORTFOLIO,
+                           STATE,
+                           business_unit BU_FLAG,
+                           CASE contract_type
+                              WHEN 'RETAIL'
+                              THEN
+                                 'CandI'
+                              WHEN 'CID'
+                              THEN
+                                 'Defaults'
+                              WHEN 'CIDSUMMARY'
+                              THEN
+                                 'Defaults'
+                              WHEN 'MASS_MARKET'
+                              THEN
+                                 CASE contract_sub_type
+                                    WHEN 'MASS_MARKET'
+                                    THEN
+                                          'Franchise - '
+                                       || DECODE (portfolio,
+                                                  'POWERCOR', 'PCOR',
+                                                  'CITIPOWER', 'CP',
+                                                  'SUNRETAIL', 'ENGX',
+                                                  portfolio)
+                                       || ' MASS MKT'
+                                    WHEN 'BASIC_WINS'
+                                    THEN
+                                       'Franchise - Basic Wins'
+                                    ELSE
+                                       contract_sub_type
+                                 END
+                              ELSE
+                                 contract_type
+                           END
+                              Category,
+                           ROUND (SUM (DECODE (peak_flag, 1, QTY, 0)), 5)
+                              LOAD_PEAK,
+                           ROUND (SUM (DECODE (peak_flag, 0, QTY)), 5)
+                              LOAD_OFFPEAK,
+                           a.dt AS period
+                      FROM v_agg_journal_month a
+                     WHERE 
+                           (   (    FRMP <> 'CNRGY'
+                                AND FRMP <> 'PACPOWER'
+                                AND FRMP <> 'CRNGY'
+                                AND FRMP <> 'INTLENGY') OR (A.DT > '28-Feb-11')
+                            )
+                  GROUP BY 
+                  snapshot_id,a.DT,
+                           portfolio,
+                           a.contract_type,
+                           a.contract_sub_type,
+                           state,
+                           FRMP,
+                           business_unit
+                  ORDER BY a.DT,
+                           portfolio,
+                           a.contract_type,
+                           a.contract_sub_type,
+                           state,
+                           business_unit)
+         SELECT *
+           FROM final_query;
+           
+        insert into TEMP_DATA.TP_ADJUSTMENT_RESULT(SNAPSHOT_ID, CATEGORY, LOAD_ACTUAL, DATETIME, STATE, LOAD_INC_FORECAST, LOAD_ADJUSTMENT, COUNTERPARTY)
+        select SNAPSHOT_ID, CATEGORY, LOAD_ACTUAL, DATETIME, STATE, LOAD_INC_FORECAST, LOAD_ADJUSTMENT, COUNTERPARTY from TEMP_DATA.TP_ADJUSTMENT 
+where load_adjustment>0; 
+
+      insert into TEMP_DATA.TP_PPA_HH_RESULT(NAME, STATE, DATETIME, QUANTITY_MW, SNAPSHOT_ID)
+      SELECT name, state, datetime, SUM (quantity_mw) quantity_mw,snapshot_id
+                      FROM TEMP_DATA.TP_SNAP_PPA_HH ppa
+                     WHERE name IN (select c_value from tp_parameters where name = 'PPA' and active='Y') group by name,state,datetime,snapshot_id ;
+      
+      insert into TEMP_DATA.TP_SETCPDATA_RESULT( DATETIME, STATE, MW, MW_INC_FORECAST, MW_ADJUSTMENT, SNAPSHOT_ID)
+       select DATETIME, STATE, MW, MW_INC_FORECAST, MW_ADJUSTMENT, in_SNAPSHOT_ID from TP_SNAP_SETCPDATA  ; 
+       
+       commit;
+
+   END;
+
+   PROCEDURE schedule_job (p_start_date       IN     DATE,
+                           out_load_request      OUT SYS_REFCURSOR)
+   IS
+   BEGIN
+      IF (p_start_date > TO_DATE ('01-jan-2000') or p_start_date is not null)
+      THEN
+         SYS.DBMS_SCHEDULER.SET_ATTRIBUTE (
+            name        => 'TEMP_DATA.TP_CALC_MASS_MARKET',
+            attribute   => 'START_DATE',
+            VALUE       => TO_TIMESTAMP_TZ (
+                                TO_CHAR (p_start_date,
+                                         'YYYY/MM/DD HH24:MI:SS')
+                             || '.000000 Australia/Sydney',
+                             'yyyy/mm/dd hh24:mi:ss.ff tzr'));
+
+         SYS.DBMS_SCHEDULER.ENABLE (name => 'TEMP_DATA.TP_CALC_MASS_MARKET');
+      ELSE
+         SYS.DBMS_SCHEDULER.DISABLE (name => 'TEMP_DATA.TP_CALC_MASS_MARKET');
+      END IF;
+
+      OPEN out_load_request FOR
+         SELECT TO_CHAR (XX.START_DATE, 'DD/MM/YYYY HH24:MI')
+                   NEW_MM_NEXT_RUN_DATE,
+                STATE
+           FROM USER_SCHEDULER_JOBS XX
+          WHERE JOB_NAME = 'TP_CALC_MASS_MARKET';
+   END;
+END;
+
 END;
 /
