@@ -31,6 +31,28 @@ IS
 
       RETURN V_TNI;
    END;
+   
+   FUNCTION fix_tni_state_mismatch (p_tni varchar2)
+      RETURN VARCHAR2
+   IS
+      v_tni   VARCHAR2 (10) := 'UNKNOWN';
+   BEGIN
+   
+--   if p_tni = v_tni then 
+--      BEGIN
+--         SELECT tni
+--           INTO v_tni
+--           FROM tp_snap_nmi
+--          WHERE nmi LIKE SUBSTR (p_nmi, 1, 10);
+--      EXCEPTION
+--         WHEN NO_DATA_FOUND
+--         THEN
+--            NULL;
+--      END;
+--
+--      RETURN V_TNI;
+null;
+   END;
 
    PROCEDURE LOG_MESSAGE (p_message IN VARCHAR2, p_type IN VARCHAR2)
    AS
@@ -68,65 +90,43 @@ IS
        INSERT INTO TEMP_DATA.TP_HH_TNI_CATEGORY_RESULT (SNAPSHOT_ID,
                                                        STATE,
                                                        DATETIME,
-                                                       MWH,
-                                                       CATEGORY_ID,
-                                                       TNI)       
-       with setcp as (
-       select SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
                                                        CATEGORY_ID,
                                                        TNI,
-                                                       sum(mwh) mwh
-                                                       from 
-                                                       TP_HH_TNI_CATEGORY_RESULT
-                                                       where snapshot_id = 
-                                                       in_snapshot_id AND category_id = g_setcp_category
-                                                       group by SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
-                                                       CATEGORY_ID,
-                                                       TNI
-       ),
-       ppa as (
-        select SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
-                                                       CATEGORY_ID,
-                                                       TNI,
-                                                       sum(mwh) mwh
-                                                       from 
-                                                       TP_HH_TNI_CATEGORY_RESULT
-                                                       where snapshot_id = 
-                                                       in_snapshot_id AND category_id = g_ppa_category
-                                                       group by SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
-                                                       CATEGORY_ID,
-                                                       TNI
-       ),
-       ci as (
-      select SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
-                                                       CATEGORY_ID,
-                                                       TNI,
-                                                       sum(mwh) mwh
-                                                       from 
-                                                       TP_HH_TNI_CATEGORY_RESULT
-                                                       where snapshot_id = 
-                                                       in_snapshot_id AND category_id = g_ci_category
-                                                       group by SNAPSHOT_ID,
-                                                       STATE,
-                                                       DATETIME,
-                                                       CATEGORY_ID,
-                                                       TNI
-       )
-       select s.snapshot_id,s.state,s.datetime,nvl(((s.mwh+nvl(p.mwh,0))-c.mwh),0),g_mm_category,c.tni
-       from 
-       ci c left join setcp s on c.snapshot_id = s.snapshot_id and c.tni = s.tni and c.datetime = s.datetime and c.state = s.state 
-       left join ppa p on c.snapshot_id = p.snapshot_id and c.tni = p.tni and c.datetime = p.datetime and c.state = p.state
-       where s.snapshot_id = in_snapshot_id;  
+                                                       MWH
+                                                       )       
+      SELECT SNAPSHOT_ID,
+       STATE,
+       DATETIME,
+       g_mm_category,
+       TNI,
+       ( (SETCP_MWH + PPA_MWH) - CI_MWH) MM_MWH
+  FROM (SELECT SNAPSHOT_ID,
+               STATE,
+               DATETIME,
+               TNI,
+               NVL (SETCP_MWH, 0) SETCP_MWH,
+               NVL (CI_MWH, 0) CI_MWH,
+               NVL (PPA_MWH, 0) PPA_MWH
+          FROM (  SELECT SNAPSHOT_ID,
+                         NAME,
+                         CASE STATE WHEN 'ACT' THEN 'NSW' ELSE STATE END STATE,
+                         DATETIME,
+                         TNI,
+                         SUM (MWH) MWH
+                    FROM V_TP_HH_TNI_CATEGORY_RESULT
+                   WHERE     SNAPSHOT_ID = IN_SNAPSHOT_ID
+                         AND datetime > in_start_date
+                         AND datetime <= in_finish_date +1
+                GROUP BY SNAPSHOT_ID,
+                         NAME,
+                         STATE,
+                         DATETIME,
+                         TNI) PIVOT (SUM (MWH)
+                                 FOR NAME
+                                 IN ('SETCP' AS "SETCP_MWH",
+                                    'CI' AS "CI_MWH",
+                                    'PPA' AS "PPA_MWH")));
+         
        
        log_message ('TP_MM_TNI_RESULT  INSERT COUNT' || SQL%ROWCOUNT, 'info');
       COMMIT;
@@ -159,7 +159,7 @@ IS
       
    END;
 
-   PROCEDURE calc_ci_tni (in_snapshot_id   IN NUMBER,
+    PROCEDURE calc_ci_tni (in_snapshot_id   IN NUMBER,
                           in_start_date    IN DATE,
                           in_finish_date   IN DATE)
    IS
