@@ -145,7 +145,9 @@ null;
    IS
    BEGIN
       DELETE TP_HH_TNI_CATEGORY_RESULT
-       WHERE snapshot_id = in_snapshot_id AND category_id = g_setcp_category;
+       WHERE snapshot_id = in_snapshot_id AND category_id = g_setcp_category
+       and  datetime > in_start_date
+                          AND datetime <= in_finish_date + 1;
        
          INSERT INTO TEMP_DATA.TP_HH_TNI_CATEGORY_RESULT (SNAPSHOT_ID,
                                                        STATE,
@@ -155,7 +157,8 @@ null;
                                                        TNI)
          select in_snapshot_id,t.state,t.datetime,t.mw/2 mwh,g_setcp_category,tcpid
          from TEMP_DATA.TP_SNAP_SETCPDATA_T t
-         where snapshot_id =in_snapshot_id;
+         where snapshot_id =in_snapshot_id and t.datetime > in_start_date
+                          AND t.datetime <= in_finish_date + 1;
       
    END;
 
@@ -165,7 +168,9 @@ null;
    IS
    BEGIN
       DELETE TP_HH_TNI_CATEGORY_RESULT
-       WHERE snapshot_id = in_snapshot_id AND category_id = g_ci_category;
+       WHERE snapshot_id = in_snapshot_id AND category_id = g_ci_category
+        and  datetime > in_start_date
+                          AND datetime <= in_finish_date + 1;
 
       INSERT INTO TEMP_DATA.TP_HH_TNI_CATEGORY_RESULT (SNAPSHOT_ID,
                                                        STATE,
@@ -230,7 +235,9 @@ null;
    IS
    BEGIN
       DELETE TP_HH_TNI_CATEGORY_RESULT
-       WHERE snapshot_id = in_snapshot_id AND category_id = g_ppa_category;
+       WHERE snapshot_id = in_snapshot_id AND category_id = g_ppa_category
+        and  datetime > in_start_date
+                          AND datetime <= in_finish_date + 1;
 
       INSERT INTO TEMP_DATA.TP_HH_TNI_CATEGORY_RESULT (SNAPSHOT_ID,
                                                        STATE,
