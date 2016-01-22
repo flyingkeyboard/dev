@@ -6,6 +6,7 @@ IS
    g_setcp_category number(2):=1;
    g_mm_category number(2):=4;
    
+   
 
  
 FUNCTION err_stack      RETURN VARCHAR2;
@@ -20,6 +21,7 @@ procedure calc_ppa_tni(in_snapshot_id   IN NUMBER,
                                    in_start_date    IN DATE,
                                    in_finish_date   IN DATE);
                                    
+
 procedure run(in_snapshot_id   IN NUMBER,
                                    in_start_date    IN DATE,
                                    in_finish_date   IN DATE); 
@@ -29,7 +31,10 @@ PROCEDURE calc_mm_tni (in_snapshot_id   IN NUMBER,
                           in_finish_date   IN DATE);                                    
                                    
 FUNCTION get_tni(p_nmi varchar2)
-      RETURN VARCHAR2;                                 
+      RETURN VARCHAR2; 
+      
+      
+                                      
    
 
 end;

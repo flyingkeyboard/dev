@@ -32,27 +32,227 @@ IS
       RETURN V_TNI;
    END;
    
-   FUNCTION fix_tni_state_mismatch (p_tni varchar2)
-      RETURN VARCHAR2
+    PROCEDURE get_netsrepp_data (in_snapshot_id   IN NUMBER,
+                                in_start_date    IN DATE,
+                                in_finish_date   IN DATE)
    IS
-      v_tni   VARCHAR2 (10) := 'UNKNOWN';
    BEGIN
-   
---   if p_tni = v_tni then 
---      BEGIN
---         SELECT tni
---           INTO v_tni
---           FROM tp_snap_nmi
---          WHERE nmi LIKE SUBSTR (p_nmi, 1, 10);
---      EXCEPTION
---         WHEN NO_DATA_FOUND
---         THEN
---            NULL;
---      END;
---
---      RETURN V_TNI;
-null;
+      FOR rec IN (SELECT table_name
+                    FROM user_tables
+                   WHERE table_name IN ('TP_SNAP_CALENDAR_HH',
+                                        'TP_SNAP_CONTRACTS',
+                                        'TP_SNAP_CONTRACT_COMPLETE',
+                                        'TP_SNAP_HH_RETAIL',
+                                        'TP_SNAP_LOAD_PROFILE',
+                                        'TP_SNAP_NMI',
+                                        'TP_SNAP_RETAIL_COMPLETE',
+                                        'TP_SNAP_RETAIL_SITE',
+                                        'TP_SNAP_SITEMETERDATA',
+                                        'TP_SNAP_SITE_TABLE'))
+      LOOP
+         EXECUTE IMMEDIATE 'truncate table  ' || rec.table_name;
+      END LOOP;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         log_message (err_stack, 'info');
+
+
+         INSERT INTO tp_snap_calendar_hh
+            SELECT *
+              FROM retail.snap_calendar_hh@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+
+         INSERT INTO TEMP_DATA.TP_SNAP_CONTRACTS
+            SELECT *
+              FROM retail.SNAP_CONTRACT@netsrepp.world
+             WHERE SNAPSHOT_ID = in_snapshot_id;
+
+         INSERT INTO TEMP_DATA.TP_SNAP_CONTRACT_COMPLETE
+            SELECT *
+              FROM retail.SNAP_CONTRACT_COMPLETE@netsrepp.world
+             WHERE SNAPSHOT_ID = in_snapshot_id;
+
+         INSERT INTO TEMP_DATA.TP_SNAP_HH_RETAIL
+            SELECT *
+              FROM retail.SNAP_HH_RETAIL@netsrepp.world
+             WHERE     SNAPSHOT_ID = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+         INSERT INTO TP_SNAP_load_profile (SNAPSHOT_ID,
+                                           SITEID,
+                                           PERIOD_CODE,
+                                           DAY_CODE,
+                                           HH,
+                                           VALUE,
+                                           CHANGE_DATE,
+                                           STD_DEV,
+                                           MM_VALUE)
+            SELECT in_SNAPSHOT_ID,
+                   SITEID,
+                   PERIOD_CODE,
+                   DAY_CODE,
+                   HH,
+                   VALUE,
+                   CHANGE_DATE,
+                   STD_DEV,
+                   MM_VALUE
+              FROM retail.snap_load_profile@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND period_code = TO_CHAR (in_start_date, 'MON');
+
+         INSERT INTO TP_SNAP_nmi (SNAPSHOT_ID,
+                                  NMI,
+                                  START_DATE,
+                                  FINISH_DATE,
+                                  TNI,
+                                  FRMP,
+                                  STATE,
+                                  LR,
+                                  LNSP,
+                                  CLASS_CODE,
+                                  METER_INSTALL_CODE,
+                                  DLF_CODE,
+                                  CHANGED_DATE,
+                                  CHANGED_BY)
+            SELECT in_SNAPSHOT_ID,
+                   NMI,
+                   START_DATE,
+                   FINISH_DATE,
+                   TNI,
+                   FRMP,
+                   STATE,
+                   LR,
+                   LNSP,
+                   CLASS_CODE,
+                   METER_INSTALL_CODE,
+                   DLF_CODE,
+                   CHANGED_DATE,
+                   CHANGED_BY
+              FROM retail.snap_nmi@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO TP_SNAP_RETAIL_COMPLETE (SNAPSHOT_ID,
+                                              CONTRACT_ID,
+                                              REV,
+                                              STATE,
+                                              LOAD_VARIANCE,
+                                              ROLL_IN_ROLL_OUT,
+                                              LOADSHEDDING,
+                                              EXTENSION,
+                                              MEET_THE_MARKET,
+                                              DEFAULT_TARIFF_CODE,
+                                              AGG_KEY)
+            SELECT SNAPSHOT_ID,
+                   CONTRACT_ID,
+                   REV,
+                   STATE,
+                   LOAD_VARIANCE,
+                   ROLL_IN_ROLL_OUT,
+                   LOADSHEDDING,
+                   EXTENSION,
+                   MEET_THE_MARKET,
+                   DEFAULT_TARIFF_CODE,
+                   AGG_KEY
+              FROM retail.snap_retail_complete@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO tp_snap_retail_site (SNAPSHOT_ID,
+                                          CONTRACT_ID,
+                                          REV,
+                                          SITEID,
+                                          START_DATE,
+                                          FINISH_DATE,
+                                          CONTRACT_VOLUME_ESTIMATE)
+            SELECT in_SNAPSHOT_ID,
+                   CONTRACT_ID,
+                   REV,
+                   SITEID,
+                   START_DATE,
+                   FINISH_DATE,
+                   CONTRACT_VOLUME_ESTIMATE
+              FROM retail.snap_retail_site@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         INSERT INTO tp_snap_sitemeterdata (SNAPSHOT_ID,
+                                            DATETIME,
+                                            MONTH_NUM,
+                                            SITEID,
+                                            DEMAND,
+                                            CHANGE_DATE,
+                                            SETTLED,
+                                            STATUS)
+            SELECT in_snapshot_id,
+                   DATETIME,
+                   MONTH_NUM,
+                   SITEID,
+                   DEMAND,
+                   CHANGE_DATE,
+                   SETTLED,
+                   STATUS
+              FROM retail.snap_sitemeterdata@netsrepp.world
+             WHERE     snapshot_id = in_snapshot_id
+                   AND DATETIME > in_start_date
+                   AND datetime <= in_finish_date + 1;
+
+         INSERT INTO TP_SNAP_site_table (SNAPSHOT_ID,
+                                         SITEID,
+                                         SITE,
+                                         STATE,
+                                         START_DATE,
+                                         FINISH_DATE,
+                                         TNI,
+                                         MDA,
+                                         NMI,
+                                         FRMP,
+                                         TYPE_FLAG,
+                                         METERTYPE,
+                                         PAM_SITECODE,
+                                         LNSP,
+                                         HOLIDAYS,
+                                         DLFCODE,
+                                         CHANGED_BY,
+                                         CHANGED_DATE,
+                                         LP,
+                                         BUSINESS_UNIT,
+                                         DEFAULT_CODE_OVERRIDE,
+                                         NMI_STATUS_CODE_ID,
+                                         STREAM_FLAG,
+                                         DERIVED_DEFAULT_TARIFF_CODE)
+            SELECT in_snapshot_id,
+                   SITEID,
+                   SITE,
+                   STATE,
+                   START_DATE,
+                   FINISH_DATE,
+                   TNI,
+                   MDA,
+                   NMI,
+                   FRMP,
+                   TYPE_FLAG,
+                   METERTYPE,
+                   PAM_SITECODE,
+                   LNSP,
+                   HOLIDAYS,
+                   DLFCODE,
+                   CHANGED_BY,
+                   CHANGED_DATE,
+                   LP,
+                   BUSINESS_UNIT,
+                   DEFAULT_CODE_OVERRIDE,
+                   NMI_STATUS_CODE_ID,
+                   STREAM_FLAG,
+                   DERIVED_DEFAULT_TARIFF_CODE
+              FROM retail.snap_site_table@netsrepp.world
+             WHERE snapshot_id = in_snapshot_id;
+
+         COMMIT;
    END;
+   
 
    PROCEDURE LOG_MESSAGE (p_message IN VARCHAR2, p_type IN VARCHAR2)
    AS
@@ -266,6 +466,30 @@ null;
          log_message (err_stack, 'error');
          RAISE;
    END;
+   
+     FUNCTION CALCULATE_ACTUAL_PERCENT(in_actual_date in date, in_end_date in date) return number
+   is
+   v_actual_pc number:=1;
+   begin
+   
+    begin
+      SELECT TO_NUMBER(TO_CHAR(in_actual_date,'DD'))/TO_NUMBER(TO_CHAR(in_end_date,'DD')) into v_actual_pc FROM 
+      dual;
+       log_message ('last actual:'||in_actual_date|| ' end_date:'||in_end_date|| ' actual_percent:'||v_actual_pc, 'info');
+      
+      return v_actual_pc;
+      
+      EXCEPTION
+      WHEN OTHERS
+      THEN
+         log_message (err_stack, 'error');
+         
+      end;
+      
+   end;
+   
+   
+ 
 
    PROCEDURE run (in_snapshot_id   IN NUMBER,
                   in_start_date    IN DATE,
