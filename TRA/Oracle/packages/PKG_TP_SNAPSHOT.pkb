@@ -519,15 +519,14 @@ IS
       -- only apply adjustment on current month
       additional_adjustment (in_snapshot_id, trunc(in_finish_date,'MON'), in_finish_date);
       -- create index on tp_agg_site_hh to speed up query performance
-    
-      
-      refresh_views(in_snapshot_id, in_start_date, in_finish_date);
       
       -- TNI level aggregation
       CALC_CI_TNI (IN_SNAPSHOT_ID, IN_START_DATE, IN_FINISH_DATE);
       CALC_PPA_TNI (IN_SNAPSHOT_ID, IN_START_DATE, IN_FINISH_DATE);
       CALC_SETCP_TNI (IN_SNAPSHOT_ID, IN_START_DATE, IN_FINISH_DATE);
       CALC_MM_TNI (IN_SNAPSHOT_ID, IN_START_DATE, IN_FINISH_DATE);
+      
+      refresh_views(in_snapshot_id, in_start_date, in_finish_date);
    
       commit;
    END;
@@ -1770,20 +1769,20 @@ IS
       insert into tp_hh_category_result(SNAPSHOT_ID,STATE, DATETIME, category_ID,  MWH)
       with ci_vol as 
       (
-      select snapshot_id,  state,datetime,pkg_tp_snapshot_extra.g_ci_category, QUANTITY_MWH ci_mwh from TEMP_DATA.tp_agg_site_hh_state_result 
+      select snapshot_id,  state,datetime,pkg_tp_snapshot.g_ci_category, QUANTITY_MWH ci_mwh from TEMP_DATA.tp_agg_site_hh_state_result 
       where snapshot_id = in_snapshot_id 
       ),
       setcp as 
-      (select snapshot_id,  state,datetime,pkg_tp_snapshot_extra.g_setcp_category, sum(mw)/2 setcp_mwh from tp_snap_setcpdata_t where snapshot_id = in_snapshot_id
+      (select snapshot_id,  state,datetime,pkg_tp_snapshot.g_setcp_category, sum(mw)/2 setcp_mwh from tp_snap_setcpdata_t where snapshot_id = in_snapshot_id
       group by snapshot_id, state,datetime),
-      ppa_vol as (select snapshot_id,  state,datetime,pkg_tp_snapshot_extra.g_ppa_category,sum(quantity_mw)/2 ppa_mwh 
+      ppa_vol as (select snapshot_id,  state,datetime,pkg_tp_snapshot.g_ppa_category,sum(quantity_mw)/2 ppa_mwh 
       from TEMP_DATA.TP_SNAP_PPA_HH where snapshot_id = in_snapshot_id
       and name IN (SELECT c_value
                                       FROM tp_parameters
                                      WHERE name = 'PPA' AND active = 'Y')
       group by snapshot_id, state,datetime)
       ,MM_V AS (
-      select ci.snapshot_id, ci.state,ci.datetime,pkg_tp_snapshot_extra.g_mm_category, nvl(((s.setcp_mwh+NVL(p.ppa_mwh,0)) - nvl(ci.ci_mwh,0)),0) mm_mwh
+      select ci.snapshot_id, ci.state,ci.datetime,pkg_tp_snapshot.g_mm_category, nvl(((s.setcp_mwh+NVL(p.ppa_mwh,0)) - nvl(ci.ci_mwh,0)),0) mm_mwh
       from ci_vol ci left join setcp s on ci.state=s.state and ci.datetime = s.datetime
       LEFT join ppa_vol p on ci.state = p.state and ci.datetime = p.datetime)
       select * from ci_vol
@@ -2469,6 +2468,7 @@ IS
          delete TEMP_DATA.TP_ADJUSTMENT_RESULT where snapshot_id = in_snapshot_id;
          delete TEMP_DATA.TP_PPA_HH_RESULT where snapshot_id = in_snapshot_id;
          delete TEMP_DATA.TP_SETCPDATA_RESULT where snapshot_id = in_snapshot_id;
+         delete TEMP_DATA.tp_HH_TNI_CATEGORY_PIVOT where snapshot_id = in_snapshot_id;
          
          insert into TEMP_DATA.TP_AGG_SITE_MONTH_RESULT(
          SNAPSHOT_ID, FRMP, PORTFOLIO, STATE, BU_FLAG, CATEGORY, LOAD_PEAK, LOAD_OFFPEAK, PERIOD,siteid)
@@ -2745,6 +2745,10 @@ IS
       insert into TEMP_DATA.TP_SETCPDATA_RESULT( DATETIME, STATE, MW, MW_INC_FORECAST, MW_ADJUSTMENT, SNAPSHOT_ID)
        select DATETIME, STATE, MW, MW_INC_FORECAST, MW_ADJUSTMENT, in_SNAPSHOT_ID from TP_SNAP_SETCPDATA  ; 
        
+       insert into tp_HH_TNI_CATEGORY_PIVOT(SNAPSHOT_ID, STATE, DATETIME, TCPID, CI_MWH, SETCP_MWH, PPA_MWH, MM_MWH, QUALITY, LATEST)
+       select SNAPSHOT_ID, STATE, DATETIME, TCPID, CI_MWH, SETCP_MWH, PPA_MWH, MM_MWH, QUALITY, LATEST
+       from V_tp_HH_TNI_CATEGORY_PIVOT where snapshot_id = in_snapshot_id;
+       
        commit;
 
    END;
@@ -2861,7 +2865,7 @@ commit;
                STATE,
                DATETIME,
                TNI,
-               NVL (SETCP_MWH, 0) SETCP_MWH,
+               NVL(SETCP_MWH,0) SETCP_MWH ,
                NVL (CI_MWH, 0) CI_MWH,
                NVL (PPA_MWH, 0) PPA_MWH
           FROM (  SELECT SNAPSHOT_ID,
@@ -2886,6 +2890,10 @@ commit;
          
        
        log_message ('TP_MM_TNI_RESULT  INSERT COUNT' || SQL%ROWCOUNT, 'info');
+       
+       
+       
+       
       COMMIT;
    EXCEPTION
       WHEN OTHERS
