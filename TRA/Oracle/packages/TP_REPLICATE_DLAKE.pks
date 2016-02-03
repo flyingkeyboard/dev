@@ -20,10 +20,12 @@ PROCEDURE gather_stats(in_table_name in varchar2);
 procedure load_table(p_owner in varchar2, p_src_table_name in varchar2, p_dest_table_name in varchar2,p_db_link  in varchar2, p_mode in varchar2 default 'append', p_data_source in varchar2);
 procedure create_tables(p_data_source in varchar2, p_db_link in varchar2);   
 procedure load_tables(p_data_source in varchar2, p_db_link in varchar2, p_fast in boolean default false);
---procedure create_view(p_table_name in varchar2);
-   procedure validate_data(p_table_name in varchar2,p_check_rows in number default 100);
-   PROCEDURE transform_table (p_table_name   IN VARCHAR2);
-                            
+procedure start_etl(p_data_source in varchar2, p_db_link in varchar2, p_check_rows in number default 100000);
+procedure validate_data(p_staging_table_name in varchar2,p_check_rows in number default 100);
+PROCEDURE transform_table (p_staging_table_name   IN VARCHAR2, p_dest_table_name   IN VARCHAR2);
+ 
+
+                           
 
 end;
 /
