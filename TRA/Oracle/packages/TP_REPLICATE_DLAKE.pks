@@ -5,6 +5,7 @@ IS
    g_source varchar2(10):='SANDPIT2';
    g_schema varchar2(30):='TRADINGANALYSIS';
    q varchar2(10):=q'[']';
+   g_staging_table_suffix varchar2(3):='_SX';
    
    
 

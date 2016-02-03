@@ -81,7 +81,7 @@ IS
    
    procedure create_table(p_owner in varchar2, p_src_table_name in varchar2, p_dest_table_name in varchar2,p_db_link  in varchar2, p_data_source in varchar2)
    is
-   v_sql varchar2(100);
+   v_sql varchar2(2000);
    
    begin
    
@@ -137,7 +137,7 @@ IS
    procedure create_tables(p_data_source in varchar2, p_db_link in varchar2)
    is
    begin
-      for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, DEST_TABLE_NAME
+      for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, DEST_TABLE_NAME||g_staging_table_suffix DEST_TABLE_NAME
       from TRADINGANALYSIS.TP_DLAKE_SNAPSHOT_TABLES where UPPER(active)='Y'  and data_source=p_data_source and db_link = p_db_link)
       loop
          drop_table(rec.dest_table_name);
@@ -179,17 +179,17 @@ IS
    begin
    
       
-      for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, DEST_TABLE_NAME
+      for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, DEST_TABLE_NAME||g_staging_table_suffix DEST_TABLE_NAME
       from TRADINGANALYSIS.TP_DLAKE_SNAPSHOT_TABLES where UPPER(active)='Y' and data_source=p_data_source and db_link = p_db_link)
       loop
          if p_fast = false then
-         load_table(p_owner=>rec.owner, p_src_table_name =>rec.src_table_name, p_dest_table_name =>rec.dest_table_name,p_db_link=>rec.db_link,p_data_source=>rec.data_source);
+            load_table(p_owner=>rec.owner, p_src_table_name =>rec.src_table_name, p_dest_table_name =>rec.dest_table_name,p_db_link=>rec.db_link,p_data_source=>rec.data_source);
          else
          -- parallel it using Oracle jobs to make it faster
-         v_job_action:= 'begin ' || g_program||'.load_table(P_OWNER =>'||q||rec.owner||q||',P_SRC_TABLE_NAME=>'||q||rec.src_table_name||q||',P_DEST_TABLE_NAME=>'
-         ||q||rec.dest_table_name||q||',P_DB_LINK=>'||q||rec.db_link||q||',P_DATA_SOURCE=>'||q||rec.data_source||q||');' || ' end;' ;
-         log_message(v_job_action,'info');
-         create_job(rec.dest_table_name||'_JOB',v_job_action,sysdate);
+            v_job_action:= 'begin ' || g_program||'.load_table(P_OWNER =>'||q||rec.owner||q||',P_SRC_TABLE_NAME=>'||q||rec.src_table_name||q||',P_DEST_TABLE_NAME=>'
+            ||q||rec.dest_table_name||q||',P_DB_LINK=>'||q||rec.db_link||q||',P_DATA_SOURCE=>'||q||rec.data_source||q||');' || ' end;' ;
+            log_message(v_job_action,'info');
+            create_job(rec.dest_table_name||'_JOB',v_job_action,sysdate);
          end if;
              
       end loop;
@@ -279,36 +279,37 @@ IS
 --   
    
     /* Formatted on 02/02/2016 10:08:48 AM (QP5 v5.269.14213.34769) */
-PROCEDURE transform_table (p_table_name   IN VARCHAR2)
+PROCEDURE transform_table (p_src_table_name   IN VARCHAR2, p_dest_table_name   IN VARCHAR2)
 IS
+
+-- the code assume p_src_table_name is the source table and p_dest_table_name is the final table
    
-   v_sql_text     VARCHAR2 (3000);
+   v_sql_text     VARCHAR2 (32767);
    v_create_sql varchar2(50);
    v_convert      VARCHAR2 (100);
    v_table_name   VARCHAR2 (100);
+   v_staging_table_name varchar2(50):= p_src_table_name || g_staging_table_suffix;
 BEGIN
    -- create view and ensure column order is the same as the staging table
    -- if there is any column that failed data type validation then leave the column as varchar2
    FOR rec
       IN (WITH get_columns
-               AS (  SELECT st.src_table_name,
-                             st.final_table_name,
-                            t.table_name,
+               AS (  SELECT 
+                            p_src_table_name src_table_name,
+                            p_dest_table_name dest_table_name,
+                            t.table_name staging_table_name,
                             c.column_name field_name,
                             column_id,
                             c.data_type original_data_type
                        FROM user_tables t
                             JOIN user_tab_columns c
                                ON t.table_name = c.table_name
-                            JOIN TRADINGANALYSIS.v_TP_DLAKE_SNAPSHOT_TABLES st
-                               ON t.table_name = st.DEST_full_table_name
-                      WHERE     st.active = 'Y'
-                            AND (t.table_name = p_table_name)
-                   ORDER BY st.src_table_name, column_id),
+                            where t.table_name = v_staging_table_name
+                   ORDER BY c.column_id),
                get_conv
                AS (  SELECT a.src_table_name,
-                            a.final_table_name, 
-                            a.table_name dest_table_name,
+                            a.staging_table_name,
+                            a.dest_table_name,
                             a.field_name,
                             a.original_data_type,
                             b.field_length,
@@ -325,7 +326,6 @@ BEGIN
                    ORDER BY dest_table_name, column_id)
             SELECT c.src_table_name,
                    c.DEST_TABLE_NAME,
-                   c.final_table_name,
                    c.field_name,
                    c.field_length,
                    c.data_type,
@@ -333,14 +333,14 @@ BEGIN
                    c.original_data_type,
                    nvl(c.target_data_type,'NA') target_data_type,
                    c.column_id,
-                   v.validation_error
+                   trim(v.validation_error) validation_error
               FROM get_conv c
                    LEFT JOIN TRADINGANALYSIS.TP_DLAKE_TABLE_VALIDATION v
-                      ON     c.src_table_name = v.table_name
+                      ON     c.DEST_TABLE_NAME = v.table_name
                          AND c.field_name = v.field_name
           ORDER BY dest_table_name, column_id)
    LOOP
-      v_create_sql:='create table '||rec.final_table_name || ' as ';
+      v_create_sql:='create table '||rec.dest_table_name || ' as ';
       v_table_name:=rec.dest_table_name;
       IF rec.validation_error IS NULL
       THEN
@@ -379,23 +379,32 @@ BEGIN
          v_sql_text := v_sql_text || ', ' || v_convert ;
       END IF;
    END LOOP;
+   
+   if length(v_sql_text) > 0 then
 
    --  v_view_col_list:= v_view_col_list || ') ';
-   v_sql_text := v_sql_text || ' from '|| v_table_name ;
+      v_sql_text := v_sql_text || ' from '|| v_table_name || ' where rownum<= 20000;';
    
-   v_sql_text:= v_create_sql||v_sql_text;
+      v_sql_text:= v_create_sql||v_sql_text;
+   else
+      log_message('No SQL Statement created','error');
+   end if;
    
   -- exec_sql(v_sql_text);
+  log_message(substr(v_sql_text,1,400),'info');
+  
   execute immediate v_sql_text;
 
 
    DBMS_OUTPUT.put_line (v_sql_text);
+   DBMS_OUTPUT.put_line ('');
+   DBMS_OUTPUT.put_line ('');
 END;
    
    
    
    
-     procedure validate_data(p_table_name in varchar2,p_check_rows in number default 100)
+     procedure validate_data(p_staging_table_name in varchar2,p_check_rows in number default 100)
    is
    v_prefix varchar2(10):= 'V_TP_';
    v_sql_header varchar2(200):= ' create or replace view '||v_prefix || p_table_name || ' ';
@@ -406,19 +415,18 @@ END;
     
    begin
    
-   
+  delete TRADINGANALYSIS.TP_DLAKE_TABLE_VALIDATION where table_name = p_staging_table_name;
    
    -- create view and ensure column order is the same as the staging table
    -- only validate columns that is varchar2 and meant to be strongly typed 
       for rec in (
          with get_columns as (
-        select  st.src_table_name, t.table_name,c.column_name field_name,column_id from user_tables t join user_tab_columns c
+        select  st.src_table_name, t.table_name,c.column_name field_name,column_id 
+        from user_tables t join user_tab_columns c
         on t.table_name=c.table_name
-        join   TRADINGANALYSIS.v_TP_DLAKE_SNAPSHOT_TABLES st 
-        on t.table_name = st.DEST_full_table_name
-        where st.active='Y' and (t.table_name = p_table_name)
+        where t.table_name = p_staging_table_name
         and c.data_type='VARCHAR2'
-        order by st.src_table_name,column_id
+        order by c.column_id
         )
         select a.src_table_name, a.table_name dest_table_name,a.field_name,b.field_length,b.data_type,b.data_format,b.oracle_type,a.column_id
         from 
@@ -450,7 +458,7 @@ END;
          exception when others then
          insert into
          tp_dlake_table_validation(TABLE_NAME, FIELD_NAME, DATA_TYPE, FIELD_LENGTH, DATA_FORMAT, ORACLE_TYPE, VALIDATION_ERROR,snapshot_time,DATA_VALUE)
-         values(rec.src_table_name,rec.field_name,
+         values(rec.DEST_TABLE_NAME,rec.field_name,
          rec.DATA_TYPE, rec.FIELD_LENGTH, rec.DATA_FORMAT, rec.ORACLE_TYPE, err_stack,sysdate,'SELECT '||REC.FIELD_NAME|| ' FROM '||REC.DEST_TABLE_NAME || ' WHERE ROWNUM<=10;');
          
          
@@ -470,6 +478,22 @@ END;
       end loop;
       
     
+   end;
+   
+   procedure validate_tables(p_data_source in varchar2, p_db_link in varchar2, p_check_rows in number default 100)
+   is
+   begin
+   
+     
+   
+     for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, STAGING_TABLE_NAME_PREFIX||DEST_TABLE_NAME DEST_TABLE_NAME
+      from TRADINGANALYSIS.TP_DLAKE_SNAPSHOT_TABLES where UPPER(active)='Y'  and data_source=p_data_source and db_link = p_db_link)
+      loop
+         validate_data(rec.dest_table_name, p_check_rows);
+      end loop;
+       exception when others then 
+         log_message(err_stack,'error');   
+   
    end;
    
    
