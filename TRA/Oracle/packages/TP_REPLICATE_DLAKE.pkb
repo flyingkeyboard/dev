@@ -46,9 +46,9 @@ IS
    
     procedure exec_sql(v_text in varchar2)
    is
-   v_sql varchar2(300);
+   v_sql varchar2(200);
    begin
-      v_sql:= substr(v_text,1,300);
+      v_sql:= substr(v_text,1,200);
       
       begin   
       log_message('Before Execute Sql Text: '||v_sql,'info');
@@ -122,7 +122,8 @@ IS
    
       
       v_sql:='insert '||v_append_hint || ' into '||p_dest_table_name || 
-      ' select * from '||p_owner||'.'||p_src_table_name || '@'||p_db_link;
+      ' select * from '||p_owner||'.'||p_src_table_name || '@'||p_db_link 
+      || ' where rownum <=100000' ;   -- testing only, remove me.
       exec_sql(v_sql); 
       
       update TRADINGANALYSIS.TP_DLAKE_SNAPSHOT_TABLES set SNAPSHOT_finish_time=sysdate, 
@@ -263,49 +264,47 @@ BEGIN
          THEN
             IF REC.target_data_TYPE LIKE 'NUMBER%'
             THEN
-               v_convert := 'TO_NUMBER(TRIM(' || REC.field_name || ')) ' ||REC.field_name ;
+               v_convert := 'TO_NUMBER(TRIM(' || '"'||REC.field_name || '"' || ')) ' ||REC.field_name ;
             ELSIF REC.target_data_TYPE LIKE 'DAT%'
             THEN
                v_convert :=
                      'TO_DATE(TRIM('
-                  || REC.field_name
+                  || '"'||REC.field_name || '"'
                   || '),'
                   || q
                   || rec.data_format
                   || q
-                  || ') ' ||REC.field_name;
+                  || ') ' ||'"'||REC.field_name || '"';
             ELSE
-               v_convert := REC.field_name  ;    -- leave the original type as we don't know what type to convert
+               v_convert := '"'||REC.field_name || '"'  ;    -- leave the original type as we don't know what type to convert
             END IF;
          ELSE
-            v_convert := REC.field_name;   -- leave the original type as it is strongly typed
+            v_convert := '"'||REC.field_name || '"';   -- leave the original type as it is strongly typed
          END IF;
       ELSE
          -- if data_type validation failed then use the original data_type
          v_convert := REC.field_name;
       END IF;
 
-
+ DBMS_OUTPUT.put_line (v_convert);
 
       IF rec.column_id = 1
       THEN
          v_sql_text := 'select ' || v_convert;
       ELSE
-         v_sql_text := v_sql_text || ', ' || v_convert ;
+         v_sql_text := v_sql_text || ', ' || v_convert;
       END IF;
    END LOOP;
    
    if length(v_sql_text) > 0 then
-
-   --  v_view_col_list:= v_view_col_list || ') ';
-      v_sql_text := v_sql_text || ' from '|| v_table_name || ' where rownum<= 20000';
-   
+     v_sql_text := v_sql_text || ' from '|| v_table_name || ' where rownum<= 20000';
       v_sql_text:= v_create_sql||v_sql_text;
+       exec_sql(v_sql_text);
    else
       log_message('No SQL Statement created','error');
    end if;
    
-  exec_sql(v_sql_text);
+ 
  
    DBMS_OUTPUT.put_line (v_sql_text);
    DBMS_OUTPUT.put_line ('');
@@ -402,12 +401,17 @@ ORDER BY dest_table_name, column_id
    for rec in (select DATA_SOURCE, DB_LINK, OWNER, SRC_TABLE_NAME, DEST_TABLE_NAME, STAGING_TABLE_NAME
       from TRADINGANALYSIS.TP_DLAKE_SNAPSHOT_TABLES where UPPER(active)='Y'  and data_source=p_data_source and db_link = p_db_link)
       loop
-      drop_table(rec.STAGING_TABLE_NAME);
-      drop_table(rec.dest_table_name);
-      create_table(rec.owner, rec.src_table_name,rec.STAGING_TABLE_NAME ,p_db_link , p_data_source);
-      load_table(p_owner=>rec.owner, p_src_table_name =>rec.src_table_name, p_dest_table_name =>rec.STAGING_TABLE_NAME,p_db_link=>rec.db_link,p_data_source=>rec.data_source);
-      validate_data(rec.STAGING_TABLE_NAME, P_CHECK_ROWS);
-      transform_table(rec.STAGING_TABLE_NAME, rec.DEST_TABLE_NAME);
+         begin
+         drop_table(rec.STAGING_TABLE_NAME);
+         drop_table(rec.dest_table_name);
+         create_table(rec.owner, rec.src_table_name,rec.STAGING_TABLE_NAME ,p_db_link , p_data_source);
+         load_table(p_owner=>rec.owner, p_src_table_name =>rec.src_table_name, p_dest_table_name =>rec.STAGING_TABLE_NAME,p_db_link=>rec.db_link,p_data_source=>rec.data_source);
+         validate_data(rec.STAGING_TABLE_NAME, P_CHECK_ROWS);
+         transform_table(rec.STAGING_TABLE_NAME, rec.DEST_TABLE_NAME);
+         exception when others then
+            log_message(err_stack,'error');   
+         end;
+         
       end loop;
        exception when others then 
          log_message(err_stack,'error');   
